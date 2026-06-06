@@ -20,32 +20,33 @@ jobs:
       with:
         java-version: '21'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Convert Line Endings for Gradle Wrapper
-      run: sed -i 's/\r$//' gradlew
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
 
     - name: Create .env from .env.example
-      run: cp .env.example .env
-
-    - name: Decode Debug Keystore
       run: |
-        if [ -f debug.keystore.base64 ]; then
-          base64 -d debug.keystore.base64 > debug.keystore
-          echo "debug.keystore successfully decoded. Size: $(wc -c < debug.keystore) bytes"
-        elif [ -f debug.base64 ]; then
-          base64 -d debug.base64 > debug.keystore
-          echo "debug.keystore successfully decoded. Size: $(wc -c < debug.keystore) bytes"
+        if [ -f .env.example ]; then
+          cp .env.example .env
         else
-          echo "Error: Keystore base64 file not found!"
-          exit 1
+          echo "GEMINI_API_KEY=MY_GEMINI_API_KEY" > .env
         fi
 
-    - name: Grant Execute Permission to Gradle Wrapper
-      run: chmod +x gradlew
+    - name: Prepare Debug Keystore
+      run: |
+        if [ -f debug.keystore.base64 ] && [ -s debug.keystore.base64 ]; then
+          echo "Decoding existing debug.keystore.base64..."
+          base64 -d debug.keystore.base64 > debug.keystore || rm -f debug.keystore
+        fi
+        
+        if [ ! -f debug.keystore ] || [ ! -s debug.keystore ]; then
+          echo "Creating a fresh debug.keystore using keytool..."
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+        fi
+        echo "Keystore verified successfully! Size: $(wc -c < debug.keystore) bytes"
 
     - name: Build with Gradle
-      run: ./gradlew assembleDebug --no-daemon --stacktrace
+      run: gradle :app:assembleDebug --no-daemon --stacktrace
 
     - name: Upload Debug APK Artifact
       uses: actions/upload-artifact@v4

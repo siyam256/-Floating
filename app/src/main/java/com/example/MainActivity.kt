@@ -176,7 +176,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Text(
-                        text = "ফোনের যেকোনো অ্যাপকে ফ্লোটিং উইন্ডো হিসেবে চালান যাতে ব্যাকগ্রাউন্ডে থ্রোটলিং বা প্রসেসিং আটকে না যায়।",
+                        text = "Run any app as a fully interactive floating window on top of other elements on your screen.",
                         color = Color(0xFFCAC4D0),
                         fontSize = 13.sp,
                         lineHeight = 18.sp,
@@ -220,7 +220,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                                 fontSize = 15.sp
                             )
                             Text(
-                                text = if (isPermissionGranted) "সহজ ফ্লোটিং শর্টকাট সক্রিয়" else "অনুমতি প্রয়োজন",
+                                text = if (isPermissionGranted) "Floating bubble active" else "Permission required",
                                 color = if (isPermissionGranted) Color(0xFFD0BCFF) else Color(0xFFF59E0B),
                                 fontSize = 12.sp
                             )
@@ -249,7 +249,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                         ) {
                             Icon(imageVector = Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("অনুমতি প্রদান করুন", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("Grant Permission", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                     } else {
                         Button(
@@ -277,7 +277,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = if (isServiceActive) "ফ্লোটিং বাবল বন্ধ করুন" else "শর্টকাট বাবল চালু করুন",
+                                text = if (isServiceActive) "Stop Floating Bubble" else "Enable Shortcut Bubble",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 14.sp
                             )
@@ -301,15 +301,15 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "⚙️ ফ্লোটিং উইন্ডো চালু করবেন যেভাবে:",
+                        text = "⚙️ How to enable Freeform Windows:",
                         color = Color(0xFFD0BCFF),
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.sp
                     )
                     Text(
-                        text = "১. ফোনের Settings > About Phone এ গিয়ে ৩-৭ বার Build Number এ ট্যাপ করে ডেভেলপার অপশন সচল করুন।\n" +
-                               "২. Developer Options থেকে 'Enable freeform windows' (বা 'মুক্ত-হস্ত উইন্ডো সচল করুন') অপশনটি চালু করুন।\n" +
-                               "৩. এবার যেকোনো অ্যাপ ফ্লোটিং করতে নিচের তালিকা থেকে ক্লিক করুন।",
+                        text = "1. Go to Settings > About Phone and tap Build Number 7 times to enable Developer options.\n" +
+                               "2. Under Developer options, enable \"Enable freeform windows\".\n" +
+                               "3. Return to this app, select any application below, and experience dynamic floating windows.",
                         color = Color(0xFFCAC4D0),
                         fontSize = 11.sp,
                         lineHeight = 16.sp,
@@ -326,7 +326,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    text = "ইনস্টল থাকা অ্যাপ তালিকা (${installedApps.size})",
+                    text = "Installed Apps (${installedApps.size})",
                     color = Color.White,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
@@ -365,7 +365,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                             decorationBox = { innerTextField ->
                                 if (searchQuery.isEmpty()) {
                                     Text(
-                                        text = "সার্চ করুন / Search app name...",
+                                        text = "Search app name...",
                                         color = Color(0x7FFFFFFF),
                                         fontSize = 14.sp
                                     )
@@ -417,7 +417,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                         .height(140.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("কোনো অ্যাপ খুঁজে পাওয়া যায়নি!", color = Color(0x66FFFFFF), fontSize = 14.sp)
+                    Text("No matching apps found!", color = Color(0x66FFFFFF), fontSize = 14.sp)
                 }
             }
         } else {

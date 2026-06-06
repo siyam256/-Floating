@@ -103,7 +103,7 @@ fun launchAppInFreeform(context: Context, packageName: String) {
         val pm = context.packageManager
         val intent = pm.getLaunchIntentForPackage(packageName)
         if (intent == null) {
-            Toast.makeText(context, "এই অ্যাপটি চালু করা যাচ্ছে না!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "This app cannot be launched!", Toast.LENGTH_SHORT).show()
             return
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
@@ -132,7 +132,7 @@ fun launchAppInFreeform(context: Context, packageName: String) {
         context.startActivity(intent, options.toBundle())
     } catch (e: Exception) {
         e.printStackTrace()
-        Toast.makeText(context, "ত্রুটি: ${e.message}", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
     }
 }
 

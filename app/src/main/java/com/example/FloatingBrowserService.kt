@@ -144,6 +144,67 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         return START_STICKY
     }
 
+    inner class WebAppInterface(private val context: Context) {
+        @android.webkit.JavascriptInterface
+        fun processBase64(base64Data: String, mimeType: String, fileName: String?) {
+            try {
+                var base64Cleaned = base64Data
+                if (base64Cleaned.contains(",")) {
+                    base64Cleaned = base64Cleaned.substring(base64Cleaned.indexOf(",") + 1)
+                }
+                
+                val fileBytes = android.util.Base64.decode(base64Cleaned, android.util.Base64.DEFAULT)
+                
+                val name = if (fileName.isNullOrBlank() || fileName == "null") {
+                    "downloaded_file_${System.currentTimeMillis()}.${getExtFromMimetype(mimeType)}"
+                } else {
+                    fileName
+                }
+                
+                val path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (!path.exists()) {
+                    path.mkdirs()
+                }
+                val file = java.io.File(path, name)
+                
+                val os = java.io.FileOutputStream(file, false)
+                os.write(fileBytes)
+                os.flush()
+                os.close()
+                
+                android.media.MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(file.absolutePath),
+                    arrayOf(mimeType),
+                    null
+                )
+                
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Toast.makeText(context, "$name downloaded successfully!", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Toast.makeText(context, "Blob download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        
+        private fun getExtFromMimetype(mimeType: String?): String {
+            if (mimeType == null) return "bin"
+            return when {
+                mimeType.contains("pdf") -> "pdf"
+                mimeType.contains("zip") -> "zip"
+                mimeType.contains("image/png") -> "png"
+                mimeType.contains("image/jpeg") || mimeType.contains("image/jpg") -> "jpg"
+                mimeType.contains("text/plain") -> "txt"
+                mimeType.contains("html") -> "html"
+                mimeType.contains("json") -> "json"
+                else -> "bin"
+            }
+        }
+    }
+
     private fun initWebView() {
         webView = WebView(this).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -167,6 +228,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 @Suppress("DEPRECATION")
                 allowUniversalAccessFromFileURLs = true
             }
+
+            addJavascriptInterface(WebAppInterface(this@FloatingBrowserService), "AndroidDownloadInterface")
 
             webChromeClient = object : WebChromeClient() {
                 override fun onShowFileChooser(
@@ -193,34 +256,65 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             }
 
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
-                try {
-                    val request = DownloadManager.Request(Uri.parse(url)).apply {
-                        setMimeType(mimetype)
-                        val cookies = CookieManager.getInstance().getCookie(url)
-                        addRequestHeader("cookie", cookies)
-                        addRequestHeader("User-Agent", userAgent)
-                        setDescription("Downloading file from Floating Browser...")
-                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                        setTitle(fileName)
-                        @Suppress("DEPRECATION")
-                        allowScanningByMediaScanner()
-                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                if (url.startsWith("blob:")) {
+                    val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                    val javaScript = """
+                        (function() {
+                            var xhr = new XMLHttpRequest();
+                            xhr.open('GET', '$url', true);
+                            xhr.responseType = 'blob';
+                            xhr.onload = function(e) {
+                                if (this.status == 200) {
+                                    var blob = this.response;
+                                    var reader = new FileReader();
+                                    reader.readAsDataURL(blob);
+                                    reader.onloadend = function() {
+                                        var base64data = reader.result;
+                                        AndroidDownloadInterface.processBase64(base64data, '$mimetype', '$fileName');
+                                    }
+                                }
+                            };
+                            xhr.send();
+                        })();
+                    """.trimIndent()
+                    post {
+                        evaluateJavascript(javaScript, null)
                     }
-                    val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-                    dm.enqueue(request)
                     Toast.makeText(
                         applicationContext,
-                        "Starting download: ${URLUtil.guessFileName(url, contentDisposition, mimetype)}",
+                        "Processing blob download: $fileName",
                         Toast.LENGTH_SHORT
                     ).show()
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                    Toast.makeText(
-                        applicationContext,
-                        "Download failed: ${e.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                } else {
+                    try {
+                        val request = DownloadManager.Request(Uri.parse(url)).apply {
+                            setMimeType(mimetype)
+                            val cookies = CookieManager.getInstance().getCookie(url)
+                            addRequestHeader("cookie", cookies)
+                            addRequestHeader("User-Agent", userAgent)
+                            setDescription("Downloading file from Floating Browser...")
+                            val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                            setTitle(fileName)
+                            @Suppress("DEPRECATION")
+                            allowScanningByMediaScanner()
+                            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                        }
+                        val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                        dm.enqueue(request)
+                        Toast.makeText(
+                            applicationContext,
+                            "Starting download: ${URLUtil.guessFileName(url, contentDisposition, mimetype)}",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        Toast.makeText(
+                            applicationContext,
+                            "Download failed: ${e.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                 }
             }
 

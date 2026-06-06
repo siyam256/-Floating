@@ -1,6 +1,6 @@
 {
-  "name": "Floating Launcher",
-  "description": "Make any installed application float in a native overlay window on your device.",
+  "name": "Floating Browser",
+  "description": "A resizable, draggable floating browser bubble and window featuring background keep-alive rendering.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

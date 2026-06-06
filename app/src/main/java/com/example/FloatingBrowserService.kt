@@ -16,8 +16,11 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.net.Uri
-import android.graphics.Rect
-import android.app.ActivityOptions
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.compose.foundation.background
@@ -29,11 +32,6 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -44,18 +42,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -67,74 +59,6 @@ import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
-
-data class InstalledApp(
-    val name: String,
-    val packageName: String,
-    val icon: android.graphics.drawable.Drawable?
-)
-
-@Composable
-fun rememberDrawablePainter(drawable: android.graphics.drawable.Drawable?): androidx.compose.ui.graphics.painter.Painter {
-    return remember(drawable) {
-        if (drawable == null) {
-            androidx.compose.ui.graphics.painter.ColorPainter(Color.Gray)
-        } else {
-            object : androidx.compose.ui.graphics.painter.Painter() {
-                override val intrinsicSize: androidx.compose.ui.geometry.Size
-                    get() = androidx.compose.ui.geometry.Size(
-                        drawable.intrinsicWidth.toFloat().coerceAtLeast(1f),
-                        drawable.intrinsicHeight.toFloat().coerceAtLeast(1f)
-                    )
-
-                override fun DrawScope.onDraw() {
-                    drawIntoCanvas { canvas ->
-                        drawable.setBounds(0, 0, size.width.toInt(), size.height.toInt())
-                        drawable.draw(canvas.nativeCanvas)
-                    }
-                }
-            }
-        }
-    }
-}
-
-fun launchAppInFreeform(context: Context, packageName: String) {
-    try {
-        val pm = context.packageManager
-        val intent = pm.getLaunchIntentForPackage(packageName)
-        if (intent == null) {
-            Toast.makeText(context, "This app cannot be launched!", Toast.LENGTH_SHORT).show()
-            return
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
-        
-        val options = ActivityOptions.makeBasic()
-        try {
-            val method = ActivityOptions::class.java.getMethod("setLaunchWindowingMode", Int::class.javaPrimitiveType)
-            method.invoke(options, 5) // 5 = WINDOWING_MODE_FREEFORM
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        
-        try {
-            val metrics = context.resources.displayMetrics
-            val screenWidth = metrics.widthPixels
-            val screenHeight = metrics.heightPixels
-            val width = (screenWidth * 0.8f).toInt()
-            val height = (screenHeight * 0.7f).toInt()
-            val left = (screenWidth - width) / 2
-            val top = (screenHeight - height) / 2
-            options.launchBounds = Rect(left, top, left + width, top + height)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        
-        context.startActivity(intent, options.toBundle())
-    } catch (e: Exception) {
-        e.printStackTrace()
-        Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_LONG).show()
-    }
-}
 
 class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, SavedStateRegistryOwner {
 
@@ -154,19 +78,18 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private lateinit var windowManager: WindowManager
     private lateinit var composeView: ComposeView
     private lateinit var params: WindowManager.LayoutParams
+    private lateinit var webView: WebView
 
-    private var isExpanded by mutableStateOf(false)
-    private var searchQuery by mutableStateOf("")
+    private var isExpanded by mutableStateOf(true)
+    private var startUrl = "https://aistudio.google.com"
 
     private var windowWidth by mutableStateOf(800)
     private var windowHeight by mutableStateOf(1100)
 
     private var posX by mutableStateOf(100)
-    private var posY by mutableStateOf(200)
+    private var posY by mutableStateOf(150)
 
     private var dpScale: Float = 1f
-    private val installedApps = mutableStateListOf<InstalledApp>()
-    private var isLoadingApps by mutableStateOf(false)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -187,19 +110,90 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
         val screenWidth = metrics.widthPixels
         val screenHeight = metrics.heightPixels
-        windowWidth = (screenWidth * 0.85f).toInt().coerceIn(400, 1000)
-        windowHeight = (screenHeight * 0.60f).toInt().coerceIn(500, 1400)
+        windowWidth = (screenWidth * 0.90f).toInt().coerceIn(360, 1080)
+        windowHeight = (screenHeight * 0.65f).toInt().coerceIn(480, 1440)
         
         posX = (screenWidth - windowWidth) / 2
-        posY = (screenHeight - windowHeight) / 3
+        posY = (screenHeight - windowHeight) / 5
 
-        loadInstalledApps()
+        initWebView()
         setupFloatingWindow()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent?.getStringExtra("EXTRA_URL")?.let { url ->
+            if (url.isNotBlank()) {
+                val formattedUrl = if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                    "https://$url"
+                } else {
+                    url
+                }
+                startUrl = formattedUrl
+                webView.post {
+                    webView.loadUrl(formattedUrl)
+                }
+                // Automatically expand to show new website loaded
+                isExpanded = true
+                updateWindowDimensions()
+            }
+        }
+        return START_STICKY
+    }
+
+    private fun initWebView() {
+        webView = WebView(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            settings.apply {
+                javaScriptEnabled = true
+                domStorageEnabled = true
+                databaseEnabled = true
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                javaScriptCanOpenWindowsAutomatically = true
+                mediaPlaybackRequiresUserGesture = false
+                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                allowFileAccess = true
+                allowContentAccess = true
+                
+                @Suppress("DEPRECATION")
+                allowFileAccessFromFileURLs = true
+                @Suppress("DEPRECATION")
+                allowUniversalAccessFromFileURLs = true
+            }
+
+            webChromeClient = object : WebChromeClient() {
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    FileChooserRegistry.filePathCallback = filePathCallback
+                    val intent = fileChooserParams?.createIntent()
+                    FileChooserRegistry.fileChooserIntent = intent
+                    
+                    val activityIntent = Intent(this@FloatingBrowserService, FileChooserActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(activityIntent)
+                    return true
+                }
+            }
+
+            webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
+                    return false
+                }
+            }
+            loadUrl(startUrl)
+        }
+    }
+
     private fun startForegroundServiceWithNotification() {
-        val channelId = "floating_launcher_channel"
-        val channelName = "Floating Launcher Service"
+        val channelId = "floating_browser_channel"
+        val channelName = "Floating Browser Service"
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -207,7 +201,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 channelName,
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Running floating application launcher in background"
+                description = "Keeps the background floating web browser active and functional"
             }
             val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(channel)
@@ -221,9 +215,9 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         )
 
         val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Floating Apps Launcher are Active")
-            .setContentText("Tap overlay bubble to select and launch apps in floating windows")
-            .setSmallIcon(android.R.drawable.ic_menu_search) 
+            .setContentTitle("Floating Browser is Active")
+            .setContentText("Keep code processing from Gemini Canvas alive in the background")
+            .setSmallIcon(android.R.drawable.ic_menu_compass) 
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
@@ -232,47 +226,17 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
-                    202611,
+                    202612,
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
                 )
             } else {
-                startForeground(202611, notification)
+                startForeground(202612, notification)
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            startForeground(202611, notification)
+            startForeground(202612, notification)
         }
-    }
-
-    private fun loadInstalledApps() {
-        isLoadingApps = true
-        Thread {
-            try {
-                val pm = packageManager
-                val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-                    addCategory(Intent.CATEGORY_LAUNCHER)
-                }
-                val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
-                val appList = resolveInfos.map { resolveInfo ->
-                    val name = resolveInfo.loadLabel(pm).toString()
-                    val packageName = resolveInfo.activityInfo.packageName
-                    val icon = resolveInfo.activityInfo.loadIcon(pm)
-                    InstalledApp(name, packageName, icon)
-                }.sortedBy { it.name.lowercase() }
-
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    installedApps.clear()
-                    installedApps.addAll(appList)
-                    isLoadingApps = false
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    isLoadingApps = false
-                }
-            }
-        }.start()
     }
 
     private fun setupFloatingWindow() {
@@ -284,11 +248,10 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         }
 
         params = WindowManager.LayoutParams(
-            (60 * dpScale).toInt(),
-            (60 * dpScale).toInt(),
+            windowWidth,
+            windowHeight,
             layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -321,6 +284,23 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             if (isExpanded) {
                 BrowserWindow()
             } else {
+                // Background Keep Alive render trick:
+                // We keep AndroidView attached to the window manager layout hierachy with 1.dp size.
+                // This prevents WebView from being paused/suspended by system during minimized background bubble state,
+                // keeping active timers, animations, and JS code compiled from Gemini Canvas fully running!
+                Box(
+                    modifier = Modifier
+                        .size(1.dp)
+                        .align(Alignment.Center)
+                ) {
+                    AndroidView(
+                        factory = {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
                 BrowserBubble()
             }
         }
@@ -344,7 +324,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     toggleExpandState()
                                 }
                                 break
-                            }
+                             }
                             val change = event.changes.firstOrNull()
                             if (change != null) {
                                 val diff = change.position - change.previousPosition
@@ -365,12 +345,12 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         ) {
             Box(
                 modifier = Modifier
-                    .size(44.dp)
-                    .shadow(elevation = 10.dp, shape = CircleShape)
-                    .border(1.5.dp, Color(0xFFD0BCFF), CircleShape)
+                    .size(48.dp)
+                    .shadow(elevation = 12.dp, shape = CircleShape)
+                    .border(2.dp, Color(0xFFD0BCFF), CircleShape)
                     .background(
                         brush = Brush.verticalGradient(
-                            colors = listOf(Color(0xFF381E72), Color(0xFF1C0D3D))
+                            colors = listOf(Color(0xFF6750A4), Color(0xFF381E72))
                         ),
                         shape = CircleShape
                     )
@@ -380,14 +360,14 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0x22FFFFFF), shape = CircleShape),
+                        .background(Color(0x1AFFFFFF), shape = CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Menu,
-                        contentDescription = "Expand Floating Apps Menu",
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Expand Floating Canvas Browser",
                         tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -399,16 +379,17 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .shadow(elevation = 24.dp, shape = RoundedCornerShape(20.dp))
-                .clip(RoundedCornerShape(20.dp))
-                .border(2.dp, Color(0xFF381E72), RoundedCornerShape(20.dp))
+                .shadow(elevation = 20.dp, shape = RoundedCornerShape(18.dp))
+                .clip(RoundedCornerShape(18.dp))
+                .border(2.dp, Color(0xFF381E72), RoundedCornerShape(18.dp))
                 .background(Color(0xFF131118))
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+                // Top Header Bar
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(50.dp)
                         .background(Color(0xFF211F26))
                         .pointerInput(Unit) {
                             detectDragGestures { change, dragAmount ->
@@ -426,120 +407,52 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(28.dp)
-                                .background(Color(0xFFD0BCFF), RoundedCornerShape(8.dp)),
+                                .size(26.dp)
+                                .background(Color(0xFFD0BCFF), RoundedCornerShape(6.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Settings,
                                 contentDescription = null,
                                 tint = Color(0xFF381E72),
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(15.dp)
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Floating Apps Launcher",
+                            text = "Floating Browser Window",
                             color = Color.White,
-                            fontSize = 14.sp,
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         IconButton(
                             onClick = { toggleExpandState() },
-                            modifier = Modifier.size(34.dp)
+                            modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Menu,
-                                contentDescription = "Minimize Launcher Panel",
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Minimize to Bubble",
                                 tint = Color(0xFFD0BCFF),
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp)
                             )
                         }
 
                         IconButton(
                             onClick = { stopSelf() },
-                            modifier = Modifier.size(34.dp)
+                            modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Close,
-                                contentDescription = "Close Floating Launcher",
+                                contentDescription = "Terminate Browser",
                                 tint = Color(0xFFF3B3B3),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
-                }
-
-                Spacer(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(Color(0xFF2C2A35))
-                )
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(Color(0xFF131118))
-                        .padding(12.dp)
-                ) {
-                    val focusManager = LocalFocusManager.current
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(44.dp)
-                            .background(Color(0xFF211F26), shape = RoundedCornerShape(12.dp))
-                            .border(1.dp, Color(0xFF381E72), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Search,
-                                contentDescription = null,
-                                tint = Color(0xFFD0BCFF),
                                 modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            BasicTextField(
-                                value = searchQuery,
-                                onValueChange = { searchQuery = it },
-                                modifier = Modifier.weight(1f),
-                                textStyle = TextStyle(color = Color.White, fontSize = 14.sp),
-                                singleLine = true,
-                                cursorBrush = SolidColor(Color(0xFFD0BCFF)),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
-                                decorationBox = { innerTextField ->
-                                    if (searchQuery.isEmpty()) {
-                                        Text(
-                                            text = "Search installed apps...",
-                                            color = Color(0x7FFFFFFF),
-                                            fontSize = 14.sp
-                                        )
-                                    }
-                                    innerTextField()
-                                }
-                            )
-                            if (searchQuery.isNotEmpty()) {
-                                Icon(
-                                    imageVector = Icons.Default.Clear,
-                                    contentDescription = "Clear Search Text",
-                                    tint = Color(0xFFD0BCFF),
-                                    modifier = Modifier
-                                        .size(18.dp)
-                                        .clickable { searchQuery = "" }
-                                )
-                            }
                         }
                     }
                 }
@@ -551,101 +464,90 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         .background(Color(0xFF2C2A35))
                 )
 
-                val filteredList = if (searchQuery.isBlank()) {
-                    installedApps
-                } else {
-                    installedApps.filter {
-                        it.name.contains(searchQuery, ignoreCase = true) ||
-                        it.packageName.contains(searchQuery, ignoreCase = true)
-                    }
+                // WebView Container occupies the central dynamic layout
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .background(Color.Black)
+                ) {
+                    AndroidView(
+                        factory = {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
 
-                if (isLoadingApps) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = Color(0xFFD0BCFF))
-                    }
-                } else if (filteredList.isEmpty()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Text("No matching apps found", color = Color(0x7FFFFFFF), fontSize = 14.sp)
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp),
-                        contentPadding = PaddingValues(vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(filteredList) { app ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Color.Transparent, shape = RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        toggleExpandState()
-                                        launchAppInFreeform(this@FloatingBrowserService, app.packageName)
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                val appPainter = rememberDrawablePainter(app.icon)
-                                Box(
-                                    modifier = Modifier
-                                        .size(36.dp)
-                                        .shadow(3.dp, RoundedCornerShape(8.dp))
-                                        .background(Color(0xFF1C1A22), RoundedCornerShape(8.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    androidx.compose.foundation.Image(
-                                        painter = appPainter,
-                                        contentDescription = app.name,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                }
-                                Spacer(modifier = Modifier.width(14.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = app.name,
-                                        color = Color.White,
-                                        fontSize = 14.sp,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = app.packageName,
-                                        color = Color(0x99FFFFFF),
-                                        fontSize = 11.sp
-                                    )
-                                }
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Launch",
-                                    tint = Color(0xFFD0BCFF).copy(alpha = 0.8f),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    }
-                }
+                Spacer(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Color(0xFF2C2A35))
+                )
 
+                // Navigation Control Bottom Toolbar (No address bar per request, only clean action buttons)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(34.dp)
-                        .background(Color(0xFF211F26))
+                        .height(48.dp)
+                        .background(Color(0xFF1C1A22))
                         .padding(horizontal = 14.dp),
-                    horizontalArrangement = Arrangement.Center,
+                    horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Tap an app to launch in dynamic floating mode",
-                        color = Color(54000 /* 0x99FFFFFF-ish grey */).copy(alpha = 0.6f),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    IconButton(
+                        onClick = { if (webView.canGoBack()) webView.goBack() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { if (webView.canGoForward()) webView.goForward() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowForward,
+                            contentDescription = "Forward",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { webView.reload() },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Reload Page",
+                            tint = Color(0xFFD0BCFF),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { webView.loadUrl(startUrl) },
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Home,
+                            contentDescription = "Reload Default Startup Link",
+                            tint = Color(0xFFD0BCFF),
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
 
+            // Interactive Drag Resizing element at the bottom right corner
             Box(
                 modifier = Modifier
                     .size(28.dp)
@@ -664,7 +566,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
-                    contentDescription = "Scale Window Dimension",
+                    contentDescription = "Resize window",
                     tint = Color(0xFFD0BCFF).copy(alpha = 0.5f),
                     modifier = Modifier
                         .size(18.dp)
@@ -732,6 +634,13 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         serviceViewModelStore.clear()
+
+        try {
+            webView.stopLoading()
+            webView.destroy()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
         if (::composeView.isInitialized && composeView.parent != null) {
             try {

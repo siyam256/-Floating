@@ -1,9 +1,14 @@
 package com.example
 
 import android.annotation.SuppressLint
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
@@ -19,6 +24,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.net.Uri
+import androidx.core.app.NotificationCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -106,6 +112,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     override fun onCreate() {
         super.onCreate()
         isRunning = true
+        startForegroundServiceWithNotification()
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
@@ -132,6 +139,56 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         setupFloatingWindow()
     }
 
+    private fun startForegroundServiceWithNotification() {
+        val channelId = "floating_browser_channel"
+        val channelName = "Floating Browser Service"
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                channelName,
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Running floating web browser in background"
+            }
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(channel)
+        }
+
+        // Action to open MainActivity
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Floating Browser is Active")
+            .setContentText("Keeping background uploads and automation alive")
+            .setSmallIcon(android.R.drawable.ic_menu_search) 
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .build()
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    202611,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(202611, notification)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // Fallback for extreme cases
+            startForeground(202611, notification)
+        }
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     private fun initWebView() {
         webView = WebView(this).apply {
@@ -151,6 +208,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 allowFileAccess = true
                 allowContentAccess = true
+                allowFileAccessFromFileURLs = true
+                allowUniversalAccessFromFileURLs = true
             }
 
             CookieManager.getInstance().setAcceptCookie(true)
@@ -268,10 +327,25 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
     @Composable
     private fun FloatingContent() {
-        if (isExpanded) {
-            BrowserWindow()
-        } else {
-            BrowserBubble()
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (isExpanded) {
+                BrowserWindow()
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(1.dp)
+                        .align(Alignment.Center)
+                ) {
+                    AndroidView(
+                        factory = {
+                            (webView.parent as? ViewGroup)?.removeView(webView)
+                            webView
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                BrowserBubble()
+            }
         }
     }
 

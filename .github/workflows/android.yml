@@ -28,9 +28,6 @@ jobs:
           chmod +x gradlew
         fi
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v4
-
     - name: Create .env from .env.example
       run: |
         if [ -f .env.example ]; then
@@ -39,18 +36,47 @@ jobs:
           echo "GEMINI_API_KEY=MY_GEMINI_API_KEY" > .env
         fi
 
+    - name: Fix Android SDK Permissions
+      run: |
+        if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
+          echo "Granting write permission to Android SDK at $ANDROID_HOME..."
+          sudo chown -R $USER:$USER "$ANDROID_HOME"
+        fi
+
+    - name: Accept Android SDK Licenses
+      run: |
+        if [ -n "$ANDROID_HOME" ] && [ -d "$ANDROID_HOME" ]; then
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin:$ANDROID_HOME/tools/bin:$PATH"
+          echo "Attempting to accept Android SDK licenses..."
+          yes | sdkmanager --licenses || true
+        fi
+
     - name: Prepare Debug Keystore
       run: |
         if [ -f debug.keystore.base64 ] && [ -s debug.keystore.base64 ]; then
-          echo "Decoding existing debug.keystore.base64..."
-          base64 -d debug.keystore.base64 > debug.keystore || rm -f debug.keystore
+          echo "Attempting to decode debug.keystore.base64..."
+          tr -d '\r\n ' < debug.keystore.base64 > debug.clean.base64
+          base64 -d debug.clean.base64 > debug.keystore 2>/dev/null || base64 --decode debug.clean.base64 > debug.keystore 2>/dev/null || rm -f debug.keystore
+          rm -f debug.clean.base64
+          
+          if [ -f debug.keystore ] && [ -s debug.keystore ]; then
+            if keytool -list -keystore debug.keystore -storepass android >/dev/null 2>&1; then
+              echo "Decoded debug.keystore is perfectly valid!"
+            else
+              echo "Decoded debug.keystore is invalid or corrupt, removing..."
+              rm -f debug.keystore
+            fi
+          fi
         fi
         
         if [ ! -f debug.keystore ] || [ ! -s debug.keystore ]; then
-          echo "Creating a fresh debug.keystore using keytool..."
+          echo "Creating a fresh, valid debug.keystore using keytool..."
           keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
         fi
         echo "Keystore verified successfully! Size: $(wc -c < debug.keystore) bytes"
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
 
     - name: Build with Gradle
       run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
@@ -60,3 +86,4 @@ jobs:
       with:
         name: Floating-Browser-Debug-APK
         path: app/build/outputs/apk/debug/app-debug.apk
+

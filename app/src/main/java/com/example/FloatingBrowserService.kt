@@ -204,6 +204,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 ): Boolean {
                     FileChooserRegistry.filePathCallback?.onReceiveValue(null)
                     FileChooserRegistry.filePathCallback = filePathCallback
+                    FileChooserRegistry.fileChooserIntent = fileChooserParams?.createIntent()
                     
                     val intent = Intent(this@FloatingBrowserService, FileChooserActivity::class.java).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -213,6 +214,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     } catch (e: Exception) {
                         FileChooserRegistry.filePathCallback?.onReceiveValue(null)
                         FileChooserRegistry.filePathCallback = null
+                        FileChooserRegistry.fileChooserIntent = null
                         return false
                     }
                     return true
@@ -231,8 +233,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         }
 
         params = WindowManager.LayoutParams(
-            (76 * dpScale).toInt(),
-            (76 * dpScale).toInt(),
+            (64 * dpScale).toInt(),
+            (64 * dpScale).toInt(),
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
@@ -310,36 +312,36 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         ) {
             Box(
                 modifier = Modifier
-                    .size(56.dp)
-                    .shadow(elevation = 10.dp, shape = RoundedCornerShape(16.dp))
-                    .border(2.dp, Color.White, RoundedCornerShape(16.dp))
+                    .size(48.dp)
+                    .shadow(elevation = 6.dp, shape = CircleShape)
+                    .border(1.dp, Color.White, CircleShape)
                     .background(
-                        color = Color(0xFFD0BCFF),
-                        shape = RoundedCornerShape(16.dp)
+                        color = Color(0xFFEADDFF),
+                        shape = CircleShape
                     )
-                    .padding(6.dp),
+                    .padding(4.dp),
                 contentAlignment = Alignment.Center
             ) {
                 if (isLoading) {
                     CircularProgressIndicator(
                         progress = { pageProgress.toFloat() / 100f },
                         modifier = Modifier.fillMaxSize(),
-                        color = Color(0xFF381E72),
-                        strokeWidth = 3.dp
+                        color = Color(0xFF210F4A),
+                        strokeWidth = 2.dp
                     )
                 }
                 
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(Color(0xFF381E72), shape = RoundedCornerShape(10.dp)),
+                        .background(Color(0xFF6750A4), shape = CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Search,
                         contentDescription = "Expand Browser",
                         tint = Color.White,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(24.dp)
                     )
                 }
             }
@@ -611,8 +613,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             params.flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         } else {
-            params.width = (76 * dpScale).toInt()
-            params.height = (76 * dpScale).toInt()
+            params.width = (64 * dpScale).toInt()
+            params.height = (64 * dpScale).toInt()
             params.x = posX
             params.y = posY
             params.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or

@@ -8,6 +8,7 @@ import android.webkit.ValueCallback
 
 object FileChooserRegistry {
     var filePathCallback: ValueCallback<Array<Uri>>? = null
+    var fileChooserIntent: Intent? = null
 }
 
 class FileChooserActivity : Activity() {
@@ -22,7 +23,7 @@ class FileChooserActivity : Activity() {
             return
         }
 
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+        val intent = FileChooserRegistry.fileChooserIntent ?: Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
             putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
@@ -36,6 +37,7 @@ class FileChooserActivity : Activity() {
         } catch (e: Exception) {
             FileChooserRegistry.filePathCallback?.onReceiveValue(null)
             FileChooserRegistry.filePathCallback = null
+            FileChooserRegistry.fileChooserIntent = null
             finish()
         }
     }
@@ -57,17 +59,21 @@ class FileChooserActivity : Activity() {
                 }
                 callback.onReceiveValue(results)
                 FileChooserRegistry.filePathCallback = null
+                FileChooserRegistry.fileChooserIntent = null
             }
         }
         finish()
     }
 
     override fun onDestroy() {
-        // Fallback: If callback is still active (e.g. activity destroyed without result),
+        // Fallback: If callback is still active and activity is finishing,
         // we must invoke it with null to prevent WebView from getting stuck.
-        FileChooserRegistry.filePathCallback?.let {
-            it.onReceiveValue(null)
-            FileChooserRegistry.filePathCallback = null
+        if (isFinishing) {
+            FileChooserRegistry.filePathCallback?.let {
+                it.onReceiveValue(null)
+                FileChooserRegistry.filePathCallback = null
+            }
+            FileChooserRegistry.fileChooserIntent = null
         }
         super.onDestroy()
     }

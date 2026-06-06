@@ -23,6 +23,7 @@
         <activity
             android:name=".FileChooserActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:exported="false" />
 
         <activity

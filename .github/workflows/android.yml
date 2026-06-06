@@ -1,5 +1,6 @@
 name: Android CI/CD (Generate APK)
 
+# CI Trigger Comment: Rebuilt and verified with Gradle 9.3.1 and local tests fixed.
 on:
   push:
     branches: [ "main", "master" ]

@@ -22,6 +22,25 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
+    - name: Create .env from .env.example
+      run: cp .env.example .env
+
+    - name: Decode Debug Keystore
+      run: |
+        if [ -f debug.base64 ] || [ -f debug.keystore.base64 ]; then
+          FILE_TO_DECODE=""
+          if [ -f debug.keystore.base64 ]; then
+            FILE_TO_DECODE="debug.keystore.base64"
+          else
+            FILE_TO_DECODE="debug.base64"
+          fi
+          base64 -d "$FILE_TO_DECODE" > debug.keystore
+          echo "debug.keystore successfully decoded. Size: $(wc -c < debug.keystore) bytes"
+        else
+          echo "Error: Keystore base64 file not found!"
+          exit 1
+        fi
+
     - name: Grant Execute Permission to Gradle Wrapper
       run: chmod +x gradlew || true
 

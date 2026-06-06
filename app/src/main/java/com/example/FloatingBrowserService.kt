@@ -149,6 +149,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 displayZoomControls = false
                 cacheMode = WebSettings.LOAD_DEFAULT
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                allowFileAccess = true
+                allowContentAccess = true
             }
 
             CookieManager.getInstance().setAcceptCookie(true)

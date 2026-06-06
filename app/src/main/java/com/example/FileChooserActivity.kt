@@ -23,6 +23,8 @@ class FileChooserActivity : Activity() {
             return
         }
 
+        clearOldCacheFiles()
+
         val intent = FileChooserRegistry.fileChooserIntent ?: Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
@@ -42,6 +44,51 @@ class FileChooserActivity : Activity() {
         }
     }
 
+    private fun clearOldCacheFiles() {
+        try {
+            cacheDir.listFiles()?.forEach { file ->
+                if (file.isFile && (file.name.startsWith("upload_temp_") || file.name.startsWith("upload_"))) {
+                    file.delete()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun copyUriToCache(uri: Uri): Uri {
+        try {
+            val contentResolver = contentResolver
+            var fileName = "upload_temp_${System.currentTimeMillis()}"
+            contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                if (nameIndex != -1 && cursor.moveToFirst()) {
+                    val displayName = cursor.getString(nameIndex)
+                    if (!displayName.isNullOrBlank()) {
+                        fileName = displayName
+                    }
+                }
+            }
+            
+            // Clean filename to prevent filesystem issues
+            fileName = "upload_" + fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+            if (!fileName.contains(".")) {
+                fileName += ".bin"
+            }
+            
+            val tempFile = java.io.File(cacheDir, fileName)
+            contentResolver.openInputStream(uri)?.use { inputStream ->
+                java.io.FileOutputStream(tempFile).use { outputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+            return Uri.fromFile(tempFile)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return uri // Fallback to raw uri on failure
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == FILE_CHOOSER_REQUEST_CODE) {
@@ -49,12 +96,21 @@ class FileChooserActivity : Activity() {
             if (callback != null) {
                 var results: Array<Uri>? = null
                 if (resultCode == RESULT_OK && data != null) {
-                    val dataString = data.dataString
                     val clipData = data.clipData
+                    val dataString = data.dataString
+                    val dataUri = data.data
+                    
                     if (clipData != null) {
-                        results = Array(clipData.itemCount) { i -> clipData.getItemAt(i).uri }
+                        val list = mutableListOf<Uri>()
+                        for (i in 0 until clipData.itemCount) {
+                            val uri = clipData.getItemAt(i).uri
+                            list.add(copyUriToCache(uri))
+                        }
+                        results = list.toTypedArray()
+                    } else if (dataUri != null) {
+                        results = arrayOf(copyUriToCache(dataUri))
                     } else if (dataString != null) {
-                        results = arrayOf(Uri.parse(dataString))
+                        results = arrayOf(copyUriToCache(Uri.parse(dataString)))
                     }
                 }
                 callback.onReceiveValue(results)

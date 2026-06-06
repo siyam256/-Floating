@@ -21,6 +21,11 @@
             android:exported="false"/>
 
         <activity
+            android:name=".FileChooserActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="false" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"

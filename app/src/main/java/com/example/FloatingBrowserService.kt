@@ -12,11 +12,13 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -193,6 +195,27 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 override fun onReceivedTitle(view: WebView?, title: String?) {
                     super.onReceivedTitle(view, title)
                     title?.let { webTitle = it }
+                }
+
+                override fun onShowFileChooser(
+                    webView: WebView?,
+                    filePathCallback: ValueCallback<Array<Uri>>?,
+                    fileChooserParams: FileChooserParams?
+                ): Boolean {
+                    FileChooserRegistry.filePathCallback?.onReceiveValue(null)
+                    FileChooserRegistry.filePathCallback = filePathCallback
+                    
+                    val intent = Intent(this@FloatingBrowserService, FileChooserActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    try {
+                        this@FloatingBrowserService.startActivity(intent)
+                    } catch (e: Exception) {
+                        FileChooserRegistry.filePathCallback?.onReceiveValue(null)
+                        FileChooserRegistry.filePathCallback = null
+                        return false
+                    }
+                    return true
                 }
             }
 

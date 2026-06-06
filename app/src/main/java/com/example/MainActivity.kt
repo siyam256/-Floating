@@ -10,6 +10,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,7 +39,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.db.SavedLink
+import com.example.db.SavedLinkDatabase
+import com.example.db.SavedLinkRepository
 import com.example.ui.theme.MyApplicationTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -66,6 +71,14 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun OverlayControllerScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    
+    val database = remember { SavedLinkDatabase.getDatabase(context) }
+    val repository = remember { SavedLinkRepository(database.savedLinkDao()) }
+    
+    val savedLinks by repository.allLinks.collectAsState(initial = emptyList())
+    var linkTitle by remember { mutableStateOf("") }
+
     var isPermissionGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var targetUrl by remember { mutableStateOf("https://aistudio.google.com") }
 
@@ -280,50 +293,170 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                             }
                         }
 
-                        // Presets Row
+                        // Link Saving & Bookmark Section
                         Column(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.padding(top = 4.dp)
                         ) {
                             Text(
-                                text = "Quick Presets:",
-                                color = Color(0xFFCAC4D0),
-                                fontSize = 11.sp,
+                                text = "Save & Bookmark Current Link:",
+                                color = Color(0xFFD0BCFF),
+                                fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold
                             )
 
-                            FlowRow(
+                            Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                val presets = listOf(
-                                    "Google AI Studio" to "https://aistudio.google.com",
-                                    "Gemini Advanced" to "https://gemini.google.com",
-                                    "ChatGPT" to "https://chatgpt.com",
-                                    "HTML5 Canvas Test" to "https://canvasjs.com/html5-javascript-charts/"
-                                )
-
-                                presets.forEach { (name, url) ->
-                                    SuggestionChip(
-                                        onClick = { 
-                                            targetUrl = url 
-                                        },
-                                        label = { Text(name, fontSize = 11.sp) },
-                                        colors = SuggestionChipDefaults.suggestionChipColors(
-                                            containerColor = Color(0xFF131118),
-                                            labelColor = Color(0xFFD0BCFF)
-                                        ),
-                                        border = SuggestionChipDefaults.suggestionChipBorder(
-                                            borderColor = Color(0xFF381E72),
-                                            enabled = true
-                                        )
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(42.dp)
+                                        .background(Color(0xFF131118), shape = RoundedCornerShape(10.dp))
+                                        .border(1.dp, Color(0xFF49454F), RoundedCornerShape(10.dp))
+                                        .padding(horizontal = 12.dp),
+                                    contentAlignment = Alignment.CenterStart
+                                ) {
+                                    BasicTextField(
+                                        value = linkTitle,
+                                        onValueChange = { linkTitle = it },
+                                        textStyle = TextStyle(color = Color.White, fontSize = 12.sp),
+                                        singleLine = true,
+                                        cursorBrush = SolidColor(Color(0xFFD0BCFF)),
+                                        decorationBox = { innerTextField ->
+                                            if (linkTitle.isEmpty()) {
+                                                Text(
+                                                    text = "Enter Link Name (e.g. Google Canvas)...",
+                                                    color = Color(0x7FFFFFFF),
+                                                    fontSize = 12.sp
+                                                )
+                                            }
+                                            innerTextField()
+                                        }
                                     )
+                                }
+
+                                Button(
+                                    onClick = {
+                                        if (targetUrl.isNotBlank()) {
+                                            val savedTitle = if (linkTitle.isBlank()) "Saved Link" else linkTitle
+                                            coroutineScope.launch {
+                                                repository.insert(SavedLink(title = savedTitle, url = targetUrl))
+                                                linkTitle = ""
+                                                android.widget.Toast.makeText(context, "Link saved successfully!", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        } else {
+                                            android.widget.Toast.makeText(context, "Please enter a URL first!", android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.height(42.dp),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF381E72),
+                                        contentColor = Color.White
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 14.dp)
+                                ) {
+                                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(15.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Save", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(4.dp))
+                        // Saved Links List
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(top = 8.dp)
+                        ) {
+                            Text(
+                                text = "My Bookmarks (${savedLinks.size}):",
+                                color = Color(0xFFCAC4D0),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+
+                            if (savedLinks.isEmpty()) {
+                                Text(
+                                    text = "No saved bookmarks yet. Enter details above to bookmark link.",
+                                    color = Color(0x66FFFFFF),
+                                    fontSize = 11.sp,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+                            } else {
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    savedLinks.forEach { savedLink ->
+                                        Surface(
+                                            modifier = Modifier
+                                                .clickable {
+                                                    targetUrl = savedLink.url
+                                                    val intent = Intent(context, FloatingBrowserService::class.java).apply {
+                                                        putExtra("EXTRA_URL", savedLink.url)
+                                                    }
+                                                    context.startService(intent)
+                                                    android.widget.Toast.makeText(
+                                                        context,
+                                                        "Loading: ${savedLink.title}",
+                                                        android.widget.Toast.LENGTH_SHORT
+                                                    ).show()
+                                                },
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = Color(0xFF131118),
+                                            border = BorderStroke(1.dp, Color(0xFF381E72))
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Star,
+                                                    contentDescription = null,
+                                                    tint = Color(0xFFD0BCFF),
+                                                    modifier = Modifier.size(13.dp)
+                                                )
+                                                
+                                                Text(
+                                                    text = savedLink.title,
+                                                    color = Color.White,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+
+                                                Spacer(modifier = Modifier.width(2.dp))
+
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(16.dp)
+                                                        .clickable {
+                                                            coroutineScope.launch {
+                                                                repository.delete(savedLink.id)
+                                                                android.widget.Toast.makeText(context, "Bookmark removed", android.widget.Toast.LENGTH_SHORT).show()
+                                                            }
+                                                        },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Delete,
+                                                        contentDescription = "Delete",
+                                                        tint = Color(0xFFF3B3B3),
+                                                        modifier = Modifier.size(12.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
 
                         Button(
                             onClick = {
@@ -414,7 +547,7 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
 
                     Text(
                         text = "1. Enable overlay permissions by clicking \"Grant Permission\" above.\n\n" +
-                               "2. Type any web link or click a quick preset, then tap \"Start Floating Browser\".\n\n" +
+                               "2. Type any web link, save it for easy access, and tap \"Start Floating Browser\".\n\n" +
                                "3. Use the floating controls (Back, Forward, Refresh, Home) to easily navigate sites. No distracting address bar overlayed on your screen!\n\n" +
                                "4. Collapse the window into an ambient floating bubble. The background 1.dp kept-alive attachment technique guarantees script execution continues running without background freezes or layout suspensions.",
                         color = Color(0xFFCAC4D0),

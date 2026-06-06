@@ -15,7 +15,11 @@ import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.app.DownloadManager
 import android.net.Uri
+import android.os.Environment
+import android.webkit.CookieManager
+import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -187,6 +191,39 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     return false
                 }
             }
+
+            setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                try {
+                    val request = DownloadManager.Request(Uri.parse(url)).apply {
+                        setMimeType(mimetype)
+                        val cookies = CookieManager.getInstance().getCookie(url)
+                        addRequestHeader("cookie", cookies)
+                        addRequestHeader("User-Agent", userAgent)
+                        setDescription("Downloading file from Floating Browser...")
+                        val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                        setTitle(fileName)
+                        @Suppress("DEPRECATION")
+                        allowScanningByMediaScanner()
+                        setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                        setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                    }
+                    val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                    dm.enqueue(request)
+                    Toast.makeText(
+                        applicationContext,
+                        "Starting download: ${URLUtil.guessFileName(url, contentDisposition, mimetype)}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(
+                        applicationContext,
+                        "Download failed: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+
             loadUrl(startUrl)
         }
     }

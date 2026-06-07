@@ -288,8 +288,10 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             val contentValues = android.content.ContentValues().apply {
                                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, attemptName)
                                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNullOrBlank()) "application/octet-stream" else mimeType)
-                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
                                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                                put(android.provider.MediaStore.MediaColumns.DATE_ADDED, System.currentTimeMillis() / 1000)
+                                put(android.provider.MediaStore.MediaColumns.TITLE, attemptName)
                             }
                             
                             val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
@@ -411,6 +413,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 mimeType.contains("text/plain") -> "txt"
                 mimeType.contains("html") -> "html"
                 mimeType.contains("json") -> "json"
+                mimeType.contains("csv") -> "csv"
                 else -> "bin"
             }
         }

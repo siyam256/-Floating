@@ -285,7 +285,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         val contentValues = android.content.ContentValues().apply {
                             put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
                             put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
                             put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                         }
                         
@@ -300,7 +300,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
                             resolver.update(uri, contentValues, null, null)
                             success = true
-                            android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore: $name")
+                            android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore to /FloatingBrowser: $name")
                         }
                     } catch (e: Exception) {
                         android.util.Log.e("FloatingBrowser", "MediaStore insert failed, using direct fallback", e)
@@ -309,7 +309,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
                 if (!success) {
                     // Legacy manual file saving fallback
-                    val path = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    val downloadPath = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    val path = java.io.File(downloadPath, "FloatingBrowser")
                     if (!path.exists()) {
                         path.mkdirs()
                     }
@@ -484,8 +485,8 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                         var bridge = getAndroidInterface();
                                         if (!bridge) {
                                             log("Android interface not available during fallback. Broadcasting via postMessage to parent...");
-                                            if (window.parent && window.parent !== window) {
-                                                window.parent.postMessage({
+                                            if (window.top && window.top !== window) {
+                                                window.top.postMessage({
                                                     type: 'BLOB_DOWNLOAD',
                                                     base64: base64Data,
                                                     mime: mime,
@@ -542,7 +543,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     
                                     var isSameOrigin = false;
                                     try {
-                                        if (f && f.location && f.location.host) {
+                                        if (f && f.document) {
                                             isSameOrigin = true;
                                         }
                                     } catch (eOrigin) {}
@@ -631,7 +632,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             @Suppress("DEPRECATION")
                             allowScanningByMediaScanner()
                             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-                            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                            setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "FloatingBrowser/$fileName")
                         }
                         val dm = getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
                         dm.enqueue(request)
@@ -708,9 +709,9 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     try {
                         var bridge = getAndroidInterface();
                         if (!bridge) {
-                            log("Android interface not available locally. Broadcasting via postMessage to parent...");
-                            if (window.parent && window.parent !== window) {
-                                window.parent.postMessage({
+                            log("Android interface not available locally. Broadcasting via postMessage to top window...");
+                            if (window.top && window.top !== window) {
+                                window.top.postMessage({
                                     type: 'BLOB_DOWNLOAD',
                                     base64: base64Data,
                                     mime: mime,
@@ -740,9 +741,9 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     try {
                         var bridge = getAndroidInterface();
                         if (!bridge) {
-                            log("Android interface not available locally for storing. Delegating storage to parent window...");
-                            if (window.parent && window.parent !== window) {
-                                window.parent.postMessage({
+                            log("Android interface not available locally for storing. Delegating storage to top window...");
+                            if (window.top && window.top !== window) {
+                                window.top.postMessage({
                                     type: 'BLOB_STORE',
                                     url: url,
                                     base64: base64Data,
@@ -977,7 +978,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     for (var i = 0; i < window.frames.length; i++) {
                         try {
                             var f = window.frames[i];
-                            if (f && f.location && f.location.host) {
+                            if (f && f.document) {
                                 installInterceptor(f);
                             }
                         } catch(eFrame) {}
@@ -993,7 +994,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         for (var i = 0; i < window.frames.length; i++) {
                             try {
                                 var f = window.frames[i];
-                                if (f && f.location && f.location.host) {
+                                if (f && f.document) {
                                     installInterceptor(f);
                                 }
                             } catch(eFrame) {}

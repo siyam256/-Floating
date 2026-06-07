@@ -269,7 +269,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 
                 val fileBytes = android.util.Base64.decode(base64Cleaned, android.util.Base64.DEFAULT)
                 
-                val name = if (fileName.isNullOrBlank() || fileName == "null") {
+                var name = if (fileName.isNullOrBlank() || fileName == "null") {
                     "downloaded_file_${System.currentTimeMillis()}.${getExtFromMimetype(mimeType)}"
                 } else {
                     fileName
@@ -280,58 +280,117 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
                 // Use modern MediaStore for Android 10+ (Q)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    try {
-                        val resolver = context.contentResolver
-                        val contentValues = android.content.ContentValues().apply {
-                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
-                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
-                            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
-                        }
-                        
-                        val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
-                        val uri = resolver.insert(collectionUri, contentValues)
-                        if (uri != null) {
-                            resolver.openOutputStream(uri)?.use { outputStream ->
-                                outputStream.write(fileBytes)
-                                outputStream.flush()
+                    var attemptName = name
+                    var retries = 3
+                    while (retries > 0 && !success) {
+                        try {
+                            val resolver = context.contentResolver
+                            val contentValues = android.content.ContentValues().apply {
+                                put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, attemptName)
+                                put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNullOrBlank()) "application/octet-stream" else mimeType)
+                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
+                                put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                             }
-                            contentValues.clear()
-                            contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
-                            resolver.update(uri, contentValues, null, null)
-                            success = true
-                            android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore to /FloatingBrowser: $name")
+                            
+                            val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                            val uri = resolver.insert(collectionUri, contentValues)
+                            if (uri != null) {
+                                resolver.openOutputStream(uri)?.use { outputStream ->
+                                    outputStream.write(fileBytes)
+                                    outputStream.flush()
+                                }
+                                contentValues.clear()
+                                contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                                resolver.update(uri, contentValues, null, null)
+                                success = true
+                                name = attemptName
+                                android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore to /FloatingBrowser: $name")
+                            } else {
+                                throw Exception("MediaStore insert returned null URI")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("FloatingBrowser", "MediaStore insert failed for name=$attemptName, retriesLeft=$retries", e)
+                            retries--
+                            if (retries > 0) {
+                                val extIdx = name.lastIndexOf('.')
+                                attemptName = if (extIdx != -1) {
+                                    val base = name.substring(0, extIdx)
+                                    val ext = name.substring(extIdx)
+                                    "${base}_${System.currentTimeMillis()}$ext"
+                                } else {
+                                    "${name}_${System.currentTimeMillis()}"
+                                }
+                            }
                         }
-                    } catch (e: Exception) {
-                        android.util.Log.e("FloatingBrowser", "MediaStore insert failed, using direct fallback", e)
                     }
                 }
 
                 if (!success) {
                     // Legacy manual file saving fallback
-                    val downloadPath = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
-                    val path = java.io.File(downloadPath, "FloatingBrowser")
-                    if (!path.exists()) {
-                        path.mkdirs()
+                    try {
+                        val downloadPath = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                        val path = java.io.File(downloadPath, "FloatingBrowser")
+                        if (!path.exists()) {
+                            path.mkdirs()
+                        }
+                        var file = java.io.File(path, name)
+                        if (file.exists()) {
+                            val extIdx = name.lastIndexOf('.')
+                            val uniqueName = if (extIdx != -1) {
+                                val base = name.substring(0, extIdx)
+                                val ext = name.substring(extIdx)
+                                "${base}_${System.currentTimeMillis()}$ext"
+                            } else {
+                                "${name}_${System.currentTimeMillis()}"
+                            }
+                            file = java.io.File(path, uniqueName)
+                            name = uniqueName
+                        }
+                        java.io.FileOutputStream(file, false).use { os ->
+                            os.write(fileBytes)
+                            os.flush()
+                        }
+                        
+                        android.media.MediaScannerConnection.scanFile(
+                            context,
+                            arrayOf(file.absolutePath),
+                            arrayOf(mimeType),
+                            null
+                        )
+                        success = true
+                        android.util.Log.d("FloatingBrowser", "Successfully written via legacy fallback: ${file.absolutePath}")
+                    } catch (legacyEx: java.lang.Exception) {
+                        android.util.Log.e("FloatingBrowser", "Legacy fallback failed", legacyEx)
                     }
-                    val file = java.io.File(path, name)
-                    java.io.FileOutputStream(file, false).use { os ->
-                        os.write(fileBytes)
-                        os.flush()
+                }
+                
+                if (!success) {
+                    // Extreme fallback to internal files directory so saving never fails under any policies
+                    try {
+                        val path = context.getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+                        val dir = java.io.File(path, "FloatingBrowser")
+                        if (!dir.exists()) {
+                            dir.mkdirs()
+                        }
+                        val file = java.io.File(dir, name)
+                        java.io.FileOutputStream(file, false).use { os ->
+                            os.write(fileBytes)
+                            os.flush()
+                        }
+                        success = true
+                        android.util.Log.d("FloatingBrowser", "Successfully written to app storage directory: ${file.absolutePath}")
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            Toast.makeText(context, "Saved to App Storage (Android/data/com.example/files/Downloads/FloatingBrowser): $name", Toast.LENGTH_LONG).show()
+                        }
+                        return
+                    } catch (eInner: java.lang.Exception) {
+                        android.util.Log.e("FloatingBrowser", "All download directories failed!", eInner)
+                        throw eInner
                     }
-                    
-                    android.media.MediaScannerConnection.scanFile(
-                        context,
-                        arrayOf(file.absolutePath),
-                        arrayOf(mimeType),
-                        null
-                    )
-                    success = true
-                    android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via Direct legacy output: ${file.absolutePath}")
                 }
                 
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Toast.makeText(context, "$name downloaded successfully!", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "$name downloaded successfully to File Manager -> Downloads -> FloatingBrowser!", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -384,6 +443,13 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             addJavascriptInterface(WebAppInterface(this@FloatingBrowserService), "AndroidDownloadInterface")
 
             webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    super.onProgressChanged(view, newProgress)
+                    if (newProgress > 5) {
+                        injectBlobInterceptor(view)
+                    }
+                }
+
                 override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
                     android.util.Log.d("FloatingBrowserConsole", "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
                     return true
@@ -442,16 +508,25 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         ).show()
                     } else {
                         // Safe same-origin fallback mechanism: dynamically search and fetch the blob URL inside every same-origin window frame recursively
-                        val escapedUrl = url.replace("'", "\\'")
-                        val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
-                        val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
+                        val escapedUrl = org.json.JSONObject.quote(url)
+                        val escapedMimeType = org.json.JSONObject.quote(mimetype ?: "application/octet-stream")
+                        val escapedFileName = org.json.JSONObject.quote(fileName ?: "downloaded_file")
 
                         val javaScript = """
                             (function() {
-                                var url = '$escapedUrl';
-                                var mime = '$escapedMimeType';
-                                var name = '$escapedFileName';
+                                var url = $escapedUrl;
+                                var mime = $escapedMimeType;
+                                var name = $escapedFileName;
                                 
+                                function isWindowSameOrigin(win) {
+                                    try {
+                                        var dummy = win.document;
+                                        return true;
+                                    } catch (e) {
+                                        return false;
+                                    }
+                                }
+
                                 function getAndroidInterface() {
                                     try {
                                         if (window.AndroidDownloadInterface) return window.AndroidDownloadInterface;
@@ -515,6 +590,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                 function getAllFrames(win, list) {
                                     if (!win) return list;
                                     list.push(win);
+                                    if (!isWindowSameOrigin(win)) return list;
                                     try {
                                         var len = win.frames.length;
                                         for (var i = 0; i < len; i++) {
@@ -523,7 +599,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                 if (f && list.indexOf(f) === -1) {
                                                     getAllFrames(f, list);
                                                 }
-                                            } catch (eInner) {}
+                                             } catch (eInner) {}
                                         }
                                     } catch(e) {}
                                     return list;
@@ -541,12 +617,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     var f = frames[currentFrameIndex];
                                     currentFrameIndex++;
                                     
-                                    var isSameOrigin = false;
-                                    try {
-                                        if (f && f.document) {
-                                            isSameOrigin = true;
-                                        }
-                                    } catch (eOrigin) {}
+                                    var isSameOrigin = isWindowSameOrigin(f);
                                     
                                     if (!isSameOrigin) {
                                         log('JS: Skipping frame ' + (currentFrameIndex - 1) + ' due to cross-origin boundary');
@@ -660,6 +731,15 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         val script = """
             (function main() {
                 var scriptCode = "(" + main.toString() + ")();";
+
+                function isWindowSameOrigin(win) {
+                    try {
+                        var dummy = win.document;
+                        return true;
+                    } catch (e) {
+                        return false;
+                    }
+                }
 
                 function getAndroidInterface() {
                     try {
@@ -791,7 +871,9 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
                 function installInterceptor(win) {
                     try {
-                        if (!win || win.__blob_interceptor_installed) return;
+                        if (!win) return;
+                        if (!isWindowSameOrigin(win)) return;
+                        if (win.__blob_interceptor_installed) return;
                         win.__blob_interceptor_installed = true;
 
                         log('Installing Blob interceptor in frame: ' + (win.location ? win.location.href : 'unknown'));
@@ -878,11 +960,13 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         if (win.document) {
                             win.document.addEventListener('click', function(e) {
                                 var target = e.target;
-                                while (target && target.tagName !== 'A') {
+                                while (target && target.nodeName !== 'A') {
                                     target = target.parentNode;
                                     if (!target) break;
                                 }
-                                if (target && target.tagName === 'A' && target.href && target.href.substring(0, 5) === 'blob:') {
+                                if (target && target.nodeName === 'A' && target.href && target.href.substring(0, 5) === 'blob:') {
+                                    e.preventDefault();
+                                    e.stopPropagation();
                                     var url = target.href;
                                     var filename = target.download || 'downloaded_file';
                                     log('DOM click intercepted for blob URL: ' + url);
@@ -978,7 +1062,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     for (var i = 0; i < window.frames.length; i++) {
                         try {
                             var f = window.frames[i];
-                            if (f && f.document) {
+                            if (f && isWindowSameOrigin(f)) {
                                 installInterceptor(f);
                             }
                         } catch(eFrame) {}
@@ -994,7 +1078,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         for (var i = 0; i < window.frames.length; i++) {
                             try {
                                 var f = window.frames[i];
-                                if (f && f.document) {
+                                if (f && isWindowSameOrigin(f)) {
                                     installInterceptor(f);
                                 }
                             } catch(eFrame) {}

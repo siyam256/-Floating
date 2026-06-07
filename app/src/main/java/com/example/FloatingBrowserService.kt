@@ -42,6 +42,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -346,7 +347,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             Toast.LENGTH_SHORT
                         ).show()
                     } else {
-                        // Safe fallback mechanism: dynamically search and fetch the blob URL inside every available window frame recursively
+                        // Safe same-origin fallback mechanism: dynamically search and fetch the blob URL inside every same-origin window frame recursively
                         val escapedUrl = url.replace("'", "\\'")
                         val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
                         val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
@@ -362,8 +363,14 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     if (!win) return list;
                                     list.push(win);
                                     try {
-                                        for (var i = 0; i < win.frames.length; i++) {
-                                            getAllFrames(win.frames[i], list);
+                                        var len = win.frames.length;
+                                        for (var i = 0; i < len; i++) {
+                                            try {
+                                                var f = win.frames[i];
+                                                if (f && list.indexOf(f) === -1) {
+                                                    getAllFrames(f, list);
+                                                }
+                                            } catch (eInner) {}
                                         }
                                     } catch(e) {}
                                     return list;
@@ -381,11 +388,24 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     var f = frames[currentFrameIndex];
                                     currentFrameIndex++;
                                     
-                                    AndroidDownloadInterface.log('JS: Attempting fetch in frame ' + (currentFrameIndex - 1) + '. Host matches: ' + (f.location ? f.location.host : 'unknown'));
+                                    var isSameOrigin = false;
+                                    try {
+                                        if (f && f.location && f.location.host) {
+                                            isSameOrigin = true;
+                                        }
+                                    } catch (eOrigin) {}
+                                    
+                                    if (!isSameOrigin) {
+                                        AndroidDownloadInterface.log('JS: Skipping frame ' + (currentFrameIndex - 1) + ' due to cross-origin boundary');
+                                        attemptNextFrame();
+                                        return;
+                                    }
+                                    
+                                    AndroidDownloadInterface.log('JS: Attempting fetch in same-origin frame ' + (currentFrameIndex - 1));
                                     try {
                                         f.fetch(url)
                                             .then(function(res) { 
-                                                AndroidDownloadInterface.log('JS: Fetch success in frame ' + (currentFrameIndex - 1));
+                                                AndroidDownloadInterface.log('JS: Fetch success in same-origin frame ' + (currentFrameIndex - 1));
                                                 return res.blob(); 
                                             })
                                             .then(function(blob) {
@@ -405,7 +425,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                     xhr.open('GET', url, true);
                                                     xhr.responseType = 'blob';
                                                     xhr.onload = function() {
-                                                        AndroidDownloadInterface.log('JS: XHR success in frame ' + (currentFrameIndex - 1) + '. Status: ' + xhr.status);
+                                                        AndroidDownloadInterface.log('JS: XHR success in same-origin frame ' + (currentFrameIndex - 1) + '. Status: ' + xhr.status);
                                                         if (xhr.status === 200 || xhr.status === 0) {
                                                             var reader = new f.FileReader();
                                                             reader.onloadend = function() {
@@ -491,21 +511,121 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         if (!win || win.__blob_interceptor_installed) return;
                         win.__blob_interceptor_installed = true;
                         
-                        var originalCreateObjectURL = win.URL.createObjectURL;
-                        win.URL.createObjectURL = function(blob) {
-                            var url = originalCreateObjectURL.apply(this, arguments);
-                            if (blob && (blob instanceof win.Blob || blob.size !== undefined || blob.slice !== undefined)) {
-                                var reader = new win.FileReader();
-                                reader.onloadend = function() {
-                                    var base64data = reader.result;
-                                    var mime = blob.type || 'application/octet-stream';
-                                    AndroidDownloadInterface.storeBlob(url, base64data, mime);
-                                };
-                                reader.readAsDataURL(blob);
+                        // 1. Intercept URL.createObjectURL
+                        if (win.URL && win.URL.createObjectURL) {
+                            var originalCreateObjectURL = win.URL.createObjectURL;
+                            win.URL.createObjectURL = function(blob) {
+                                // Prevent Illegal Invocation by calling on win.URL context
+                                var url = originalCreateObjectURL.call(win.URL, blob);
+                                if (blob) {
+                                    try {
+                                        var reader = new win.FileReader();
+                                        reader.onloadend = function() {
+                                            var base64data = reader.result;
+                                            var mime = blob.type || 'application/octet-stream';
+                                            AndroidDownloadInterface.storeBlob(url, base64data, mime);
+                                        };
+                                        reader.onerror = function() {
+                                            AndroidDownloadInterface.log('Reader error in URL.createObjectURL');
+                                        };
+                                        reader.readAsDataURL(blob);
+                                    } catch (err) {
+                                        AndroidDownloadInterface.log('createObjectURL convert error: ' + err.message);
+                                    }
+                                }
+                                return url;
+                             };
+                        }
+                        
+                        // 2. Intercept window.open
+                        var originalOpen = win.open;
+                        win.open = function(url, target, features) {
+                            if (url && url.substring(0, 5) === 'blob:') {
+                                AndroidDownloadInterface.log('window.open intercepted for blob: ' + url);
+                                try {
+                                    win.fetch(url)
+                                        .then(function(res) { return res.blob(); })
+                                        .then(function(blob) {
+                                            var reader = new win.FileReader();
+                                            reader.onloadend = function() {
+                                                AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', 'downloaded_file');
+                                            };
+                                            reader.readAsDataURL(blob);
+                                        })
+                                        .catch(function(err) {
+                                            AndroidDownloadInterface.log('window.open fetch failed: ' + err.message);
+                                        });
+                                } catch(e) {
+                                    AndroidDownloadInterface.log('window.open hander crash: ' + e.message);
+                                }
+                                return null;
                             }
-                            return url;
-                         };
-                         AndroidDownloadInterface.log('Blob interceptor installed inside window/frame: ' + (win.location ? win.location.href : 'unknown'));
+                            return originalOpen.apply(this, arguments);
+                        };
+
+                        // 3. Intercept HTMLAnchorElement.prototype.click
+                        if (win.HTMLAnchorElement && win.HTMLAnchorElement.prototype) {
+                            var originalClick = win.HTMLAnchorElement.prototype.click;
+                            win.HTMLAnchorElement.prototype.click = function() {
+                                var href = this.href;
+                                if (href && href.substring(0, 5) === 'blob:') {
+                                    var filename = this.download || 'downloaded_file';
+                                    AndroidDownloadInterface.log('Anchor prototype click() intercepted: ' + href);
+                                    try {
+                                        win.fetch(href)
+                                            .then(function(res) { return res.blob(); })
+                                            .then(function(blob) {
+                                                var reader = new win.FileReader();
+                                                reader.onloadend = function() {
+                                                    AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', filename);
+                                                };
+                                                reader.readAsDataURL(blob);
+                                            })
+                                            .catch(function(err) {
+                                                AndroidDownloadInterface.log('Anchor prototype click fetch failed: ' + err.message);
+                                            });
+                                    } catch(e) {
+                                        AndroidDownloadInterface.log('Anchor prototype click handler crash: ' + e.message);
+                                    }
+                                    return;
+                                }
+                                return originalClick.apply(this, arguments);
+                            };
+                        }
+
+                        // 4. Dom Clicks Event Listener
+                        if (win.document) {
+                            win.document.addEventListener('click', function(e) {
+                                var target = e.target;
+                                while (target && target.tagName !== 'A') {
+                                    target = target.parentNode;
+                                    if (!target) break;
+                                }
+                                if (target && target.tagName === 'A' && target.href && target.href.substring(0, 5) === 'blob:') {
+                                    var url = target.href;
+                                    var filename = target.download || 'downloaded_file';
+                                    AndroidDownloadInterface.log('DOM click intercepted for blob URL: ' + url);
+                                    try {
+                                        win.fetch(url)
+                                            .then(function(res) { return res.blob(); })
+                                            .then(function(blob) {
+                                                var reader = new win.FileReader();
+                                                reader.onloadend = function() {
+                                                    AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', filename);
+                                                };
+                                                reader.readAsDataURL(blob);
+                                            })
+                                            .catch(function(err) {
+                                                AndroidDownloadInterface.log('DOM click fetch failed: ' + err.message);
+                                            });
+                                    } catch(err2) {
+                                        AndroidDownloadInterface.log('DOM click crash: ' + err2.message);
+                                    }
+                                }
+                            }, true);
+                        }
+
+                        AndroidDownloadInterface.log('Blob interceptor installed inside window/frame: ' + (win.location ? win.location.href : 'unknown'));
                     } catch(e) {
                          AndroidDownloadInterface.log('Failed to install Blob interceptor in frame: ' + e.message);
                     }
@@ -685,6 +805,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             Box(
                 modifier = Modifier
                     .size(48.dp)
+                    .alpha(0.55f)
                     .shadow(elevation = 12.dp, shape = CircleShape)
                     .border(2.dp, Color(0xFFD0BCFF), CircleShape)
                     .background(

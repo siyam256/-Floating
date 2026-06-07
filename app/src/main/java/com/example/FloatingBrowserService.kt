@@ -153,17 +153,25 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
         @android.webkit.JavascriptInterface
         fun storeBlob(url: String, base64Data: String, mimeType: String) {
-            android.util.Log.d("FloatingBrowser", "Intercepted blob stored. URL: $url, MimeType: $mimeType, Size: ${base64Data.length}")
+            val length = base64Data.length
+            android.util.Log.d("FloatingBrowser", "Intercepted blob stored. URL: $url, MimeType: $mimeType, Size: $length")
             blobDataMap[url] = Pair(base64Data, mimeType)
         }
 
         @android.webkit.JavascriptInterface
         fun processBase64(base64Data: String, mimeType: String, fileName: String?) {
             try {
-                var base64Cleaned = base64Data
+                var base64Cleaned = base64Data.trim()
+                if (base64Cleaned.startsWith("\"") && base64Cleaned.endsWith("\"")) {
+                    base64Cleaned = base64Cleaned.substring(1, base64Cleaned.length - 1)
+                }
+                if (base64Cleaned.startsWith("'") && base64Cleaned.endsWith("'")) {
+                    base64Cleaned = base64Cleaned.substring(1, base64Cleaned.length - 1)
+                }
                 if (base64Cleaned.contains(",")) {
                     base64Cleaned = base64Cleaned.substring(base64Cleaned.indexOf(",") + 1)
                 }
+                base64Cleaned = base64Cleaned.trim()
                 
                 val fileBytes = android.util.Base64.decode(base64Cleaned, android.util.Base64.DEFAULT)
                 
@@ -183,7 +191,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         val contentValues = android.content.ContentValues().apply {
                             put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
                             put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/")
+                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
                             put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                         }
                         
@@ -338,7 +346,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             Toast.LENGTH_SHORT
                         ).show()
                     } else {
-                        // Fallback mechanism: use fetch/xhr to dynamically fetch it
+                        // Safe fallback mechanism: dynamically search and fetch the blob URL inside every available window frame recursively
                         val escapedUrl = url.replace("'", "\\'")
                         val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
                         val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
@@ -348,52 +356,83 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                 var url = '$escapedUrl';
                                 var mime = '$escapedMimeType';
                                 var name = '$escapedFileName';
-                                AndroidDownloadInterface.log('JS: Init blob fetch: ' + url);
+                                AndroidDownloadInterface.log('JS: Init recursive frame blob fetch for: ' + url);
                                 
-                                fetch(url)
-                                    .then(function(res) {
-                                        AndroidDownloadInterface.log('JS: Fetch success. Converting to Blob...');
-                                        return res.blob();
-                                    })
-                                    .then(function(blob) {
-                                        AndroidDownloadInterface.log('JS: Blob captured. Size: ' + blob.size);
-                                        var reader = new FileReader();
-                                        reader.onloadend = function() {
-                                            var base64data = reader.result;
-                                            AndroidDownloadInterface.log('JS: Base64 processed. Byte size: ' + base64data.length);
-                                            AndroidDownloadInterface.processBase64(base64data, mime, name);
-                                        };
-                                        reader.onerror = function(err) {
-                                            AndroidDownloadInterface.log('JS: FileReader failed: ' + JSON.stringify(err));
-                                        };
-                                        reader.readAsDataURL(blob);
-                                    })
-                                    .catch(function(err) {
-                                        AndroidDownloadInterface.log('JS: Fetch failed: ' + err.message + '. Retrying with XHR.');
-                                        try {
-                                            var xhr = new XMLHttpRequest();
-                                            xhr.open('GET', url, true);
-                                            xhr.responseType = 'blob';
-                                            xhr.onload = function() {
-                                                AndroidDownloadInterface.log('JS: XHR finished. Status: ' + xhr.status);
-                                                if (xhr.status === 200 || xhr.status === 0) {
-                                                    var reader = new FileReader();
-                                                    reader.onloadend = function() {
-                                                        AndroidDownloadInterface.processBase64(reader.result, mime, name);
-                                                    };
-                                                    reader.readAsDataURL(xhr.response);
-                                                } else {
-                                                    AndroidDownloadInterface.log('JS: XHR failed with status: ' + xhr.status);
-                                                }
-                                            };
-                                            xhr.onerror = function(err) {
-                                                AndroidDownloadInterface.log('JS: XHR load failed: ' + JSON.stringify(err));
-                                            };
-                                            xhr.send();
-                                        } catch(e) {
-                                            AndroidDownloadInterface.log('JS: XHR handler crashed: ' + e.message);
+                                function getAllFrames(win, list) {
+                                    if (!win) return list;
+                                    list.push(win);
+                                    try {
+                                        for (var i = 0; i < win.frames.length; i++) {
+                                            getAllFrames(win.frames[i], list);
                                         }
-                                    });
+                                    } catch(e) {}
+                                    return list;
+                                }
+                                
+                                var frames = getAllFrames(window, []);
+                                var currentFrameIndex = 0;
+                                
+                                function attemptNextFrame() {
+                                    if (currentFrameIndex >= frames.length) {
+                                        AndroidDownloadInterface.log('JS: Blob fetch failed in all frames.');
+                                        return;
+                                    }
+                                    
+                                    var f = frames[currentFrameIndex];
+                                    currentFrameIndex++;
+                                    
+                                    AndroidDownloadInterface.log('JS: Attempting fetch in frame ' + (currentFrameIndex - 1) + '. Host matches: ' + (f.location ? f.location.host : 'unknown'));
+                                    try {
+                                        f.fetch(url)
+                                            .then(function(res) { 
+                                                AndroidDownloadInterface.log('JS: Fetch success in frame ' + (currentFrameIndex - 1));
+                                                return res.blob(); 
+                                            })
+                                            .then(function(blob) {
+                                                AndroidDownloadInterface.log('JS: Blob captured. Size: ' + blob.size);
+                                                var reader = new f.FileReader();
+                                                reader.onloadend = function() {
+                                                    var base64data = reader.result;
+                                                    AndroidDownloadInterface.log('JS: Converting blob to Base64 data...');
+                                                    AndroidDownloadInterface.processBase64(base64data, mime, name);
+                                                };
+                                                reader.readAsDataURL(blob);
+                                            })
+                                            .catch(function(err) {
+                                                AndroidDownloadInterface.log('JS: Fetch in frame ' + (currentFrameIndex - 1) + ' failed: ' + err.message + '. Retrying with XHR inside frame.');
+                                                try {
+                                                    var xhr = new f.XMLHttpRequest();
+                                                    xhr.open('GET', url, true);
+                                                    xhr.responseType = 'blob';
+                                                    xhr.onload = function() {
+                                                        AndroidDownloadInterface.log('JS: XHR success in frame ' + (currentFrameIndex - 1) + '. Status: ' + xhr.status);
+                                                        if (xhr.status === 200 || xhr.status === 0) {
+                                                            var reader = new f.FileReader();
+                                                            reader.onloadend = function() {
+                                                                AndroidDownloadInterface.processBase64(reader.result, mime, name);
+                                                            };
+                                                            reader.readAsDataURL(xhr.response);
+                                                        } else {
+                                                            attemptNextFrame();
+                                                        }
+                                                    };
+                                                    xhr.onerror = function() { 
+                                                        AndroidDownloadInterface.log('JS: XHR error in frame ' + (currentFrameIndex - 1));
+                                                        attemptNextFrame(); 
+                                                    };
+                                                    xhr.send();
+                                                } catch(e) {
+                                                    AndroidDownloadInterface.log('JS: Frame XHR crash: ' + e.message);
+                                                    attemptNextFrame();
+                                                }
+                                            });
+                                    } catch(e) {
+                                        AndroidDownloadInterface.log('JS: Frame fetch block crash: ' + e.message);
+                                        attemptNextFrame();
+                                    }
+                                }
+                                
+                                attemptNextFrame();
                             })();
                         """.trimIndent()
 
@@ -447,28 +486,43 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private fun injectBlobInterceptor(view: WebView?) {
         val script = """
             (function() {
-                if (window.__blob_interceptor_installed) return;
-                window.__blob_interceptor_installed = true;
-                
-                try {
-                    var originalCreateObjectURL = window.URL.createObjectURL;
-                    window.URL.createObjectURL = function(blob) {
-                        var url = originalCreateObjectURL.apply(this, arguments);
-                        if (blob instanceof Blob) {
-                            var reader = new FileReader();
-                            reader.onloadend = function() {
-                                var base64data = reader.result;
-                                var mime = blob.type || 'application/octet-stream';
-                                AndroidDownloadInterface.storeBlob(url, base64data, mime);
-                            };
-                            reader.readAsDataURL(blob);
+                function installInterceptor(win) {
+                    try {
+                        if (!win || win.__blob_interceptor_installed) return;
+                        win.__blob_interceptor_installed = true;
+                        
+                        var originalCreateObjectURL = win.URL.createObjectURL;
+                        win.URL.createObjectURL = function(blob) {
+                            var url = originalCreateObjectURL.apply(this, arguments);
+                            if (blob && (blob instanceof win.Blob || blob.size !== undefined || blob.slice !== undefined)) {
+                                var reader = new win.FileReader();
+                                reader.onloadend = function() {
+                                    var base64data = reader.result;
+                                    var mime = blob.type || 'application/octet-stream';
+                                    AndroidDownloadInterface.storeBlob(url, base64data, mime);
+                                };
+                                reader.readAsDataURL(blob);
+                            }
+                            return url;
+                         };
+                         AndroidDownloadInterface.log('Blob interceptor installed inside window/frame: ' + (win.location ? win.location.href : 'unknown'));
+                    } catch(e) {
+                         AndroidDownloadInterface.log('Failed to install Blob interceptor in frame: ' + e.message);
+                    }
+                    
+                    try {
+                        for (var i = 0; i < win.frames.length; i++) {
+                            installInterceptor(win.frames[i]);
                         }
-                        return url;
-                     };
-                     AndroidDownloadInterface.log('Blob interceptor installed via page injection.');
-                } catch(e) {
-                    AndroidDownloadInterface.log('Failed to install Blob interceptor: ' + e.message);
+                    } catch(e) {}
                 }
+                
+                installInterceptor(window);
+                
+                // Periodically install on dynamic/late-loaded iframe frames
+                setInterval(function() {
+                    installInterceptor(window);
+                }, 1000);
             })();
         """.trimIndent()
         view?.post {

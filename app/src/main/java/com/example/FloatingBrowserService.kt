@@ -146,6 +146,11 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
     inner class WebAppInterface(private val context: Context) {
         @android.webkit.JavascriptInterface
+        fun log(message: String) {
+            android.util.Log.d("FloatingBrowserJS", "JS Log: $message")
+        }
+
+        @android.webkit.JavascriptInterface
         fun processBase64(base64Data: String, mimeType: String, fileName: String?) {
             try {
                 var base64Cleaned = base64Data
@@ -161,31 +166,68 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     fileName
                 }
                 
-                val path = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-                if (!path.exists()) {
-                    path.mkdirs()
+                android.util.Log.d("FloatingBrowser", "Saving Base64 file: $name, bytes: ${fileBytes.size}, pattern: $mimeType")
+                var success = false
+
+                // Use modern MediaStore for Android 10+ (Q)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    try {
+                        val resolver = context.contentResolver
+                        val contentValues = android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                        }
+                        
+                        val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                        val uri = resolver.insert(collectionUri, contentValues)
+                        if (uri != null) {
+                            resolver.openOutputStream(uri)?.use { outputStream ->
+                                outputStream.write(fileBytes)
+                                outputStream.flush()
+                            }
+                            contentValues.clear()
+                            contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                            resolver.update(uri, contentValues, null, null)
+                            success = true
+                            android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore: $name")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("FloatingBrowser", "MediaStore insert failed, using direct fallback", e)
+                    }
                 }
-                val file = java.io.File(path, name)
-                
-                val os = java.io.FileOutputStream(file, false)
-                os.write(fileBytes)
-                os.flush()
-                os.close()
-                
-                android.media.MediaScannerConnection.scanFile(
-                    context,
-                    arrayOf(file.absolutePath),
-                    arrayOf(mimeType),
-                    null
-                )
+
+                if (!success) {
+                    // Legacy manual file saving fallback
+                    val path = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+                    if (!path.exists()) {
+                        path.mkdirs()
+                    }
+                    val file = java.io.File(path, name)
+                    java.io.FileOutputStream(file, false).use { os ->
+                        os.write(fileBytes)
+                        os.flush()
+                    }
+                    
+                    android.media.MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(file.absolutePath),
+                        arrayOf(mimeType),
+                        null
+                    )
+                    success = true
+                    android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via Direct legacy output: ${file.absolutePath}")
+                }
                 
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     Toast.makeText(context, "$name downloaded successfully!", Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
+                android.util.Log.e("FloatingBrowser", "Exception saving Base64 file", e)
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    Toast.makeText(context, "Blob download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -232,6 +274,11 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             addJavascriptInterface(WebAppInterface(this@FloatingBrowserService), "AndroidDownloadInterface")
 
             webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
+                    android.util.Log.d("FloatingBrowserConsole", "${consoleMessage?.message()} -- From line ${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
+                    return true
+                }
+
                 override fun onShowFileChooser(
                     webView: WebView?,
                     filePathCallback: ValueCallback<Array<Uri>>?,
@@ -258,28 +305,68 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                 if (url.startsWith("blob:")) {
                     val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
+                    val escapedUrl = url.replace("'", "\\'")
+                    val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
+                    val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
+
                     val javaScript = """
                         (function() {
-                            var xhr = new XMLHttpRequest();
-                            xhr.open('GET', '$url', true);
-                            xhr.responseType = 'blob';
-                            xhr.onload = function(e) {
-                                if (this.status == 200) {
-                                    var blob = this.response;
+                            var url = '$escapedUrl';
+                            var mime = '$escapedMimeType';
+                            var name = '$escapedFileName';
+                            AndroidDownloadInterface.log('JS: Init blob fetch: ' + url);
+                            
+                            fetch(url)
+                                .then(function(res) {
+                                    AndroidDownloadInterface.log('JS: Fetch success. Converting to Blob...');
+                                    return res.blob();
+                                })
+                                .then(function(blob) {
+                                    AndroidDownloadInterface.log('JS: Blob captured. Size: ' + blob.size);
                                     var reader = new FileReader();
-                                    reader.readAsDataURL(blob);
                                     reader.onloadend = function() {
                                         var base64data = reader.result;
-                                        AndroidDownloadInterface.processBase64(base64data, '$mimetype', '$fileName');
+                                        AndroidDownloadInterface.log('JS: Base64 processed. Byte size: ' + base64data.length);
+                                        AndroidDownloadInterface.processBase64(base64data, mime, name);
+                                    };
+                                    reader.onerror = function(err) {
+                                        AndroidDownloadInterface.log('JS: FileReader failed: ' + JSON.stringify(err));
+                                    };
+                                    reader.readAsDataURL(blob);
+                                })
+                                .catch(function(err) {
+                                    AndroidDownloadInterface.log('JS: Fetch failed: ' + err.message + '. Retrying with XHR.');
+                                    try {
+                                        var xhr = new XMLHttpRequest();
+                                        xhr.open('GET', url, true);
+                                        xhr.responseType = 'blob';
+                                        xhr.onload = function() {
+                                            AndroidDownloadInterface.log('JS: XHR finished. Status: ' + xhr.status);
+                                            if (xhr.status === 200 || xhr.status === 0) {
+                                                var reader = new FileReader();
+                                                reader.onloadend = function() {
+                                                    AndroidDownloadInterface.processBase64(reader.result, mime, name);
+                                                };
+                                                reader.readAsDataURL(xhr.response);
+                                            } else {
+                                                AndroidDownloadInterface.log('JS: XHR failed with status: ' + xhr.status);
+                                            }
+                                        };
+                                        xhr.onerror = function(err) {
+                                            AndroidDownloadInterface.log('JS: XHR load failed: ' + JSON.stringify(err));
+                                        };
+                                        xhr.send();
+                                    } catch(e) {
+                                        AndroidDownloadInterface.log('JS: XHR handler crashed: ' + e.message);
                                     }
-                                }
-                            };
-                            xhr.send();
+                                });
                         })();
                     """.trimIndent()
+
                     post {
                         evaluateJavascript(javaScript, null)
                     }
+
                     Toast.makeText(
                         applicationContext,
                         "Processing blob download: $fileName",

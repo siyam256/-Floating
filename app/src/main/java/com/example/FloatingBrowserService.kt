@@ -83,6 +83,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private lateinit var composeView: ComposeView
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var webView: WebView
+    private val blobDataMap = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String>>()
 
     private var isExpanded by mutableStateOf(true)
     private var startUrl = "https://aistudio.google.com"
@@ -151,6 +152,12 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
         }
 
         @android.webkit.JavascriptInterface
+        fun storeBlob(url: String, base64Data: String, mimeType: String) {
+            android.util.Log.d("FloatingBrowser", "Intercepted blob stored. URL: $url, MimeType: $mimeType, Size: ${base64Data.length}")
+            blobDataMap[url] = Pair(base64Data, mimeType)
+        }
+
+        @android.webkit.JavascriptInterface
         fun processBase64(base64Data: String, mimeType: String, fileName: String?) {
             try {
                 var base64Cleaned = base64Data
@@ -176,7 +183,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         val contentValues = android.content.ContentValues().apply {
                             put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
                             put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+                            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/")
                             put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                         }
                         
@@ -300,78 +307,106 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
                     return false
                 }
+
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    injectBlobInterceptor(view)
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    injectBlobInterceptor(view)
+                }
             }
 
             setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
                 if (url.startsWith("blob:")) {
                     val fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
-                    val escapedUrl = url.replace("'", "\\'")
-                    val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
-                    val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
+                    val interceptedUrl = url
+                    val intercepted = blobDataMap[interceptedUrl]
+                    
+                    if (intercepted != null) {
+                        val base64Data = intercepted.first
+                        val resolvedMimetype = if (mimetype.isNullOrBlank() || mimetype == "application/octet-stream") intercepted.second else mimetype
+                        android.util.Log.d("FloatingBrowser", "Instant blob download from intercepted cache: $interceptedUrl")
+                        Thread {
+                            WebAppInterface(this@FloatingBrowserService).processBase64(base64Data, resolvedMimetype, fileName)
+                        }.start()
+                        Toast.makeText(
+                            applicationContext,
+                            "Downloading: $fileName",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        // Fallback mechanism: use fetch/xhr to dynamically fetch it
+                        val escapedUrl = url.replace("'", "\\'")
+                        val escapedMimeType = mimetype?.replace("'", "\\'") ?: "application/octet-stream"
+                        val escapedFileName = fileName?.replace("'", "\\'") ?: "downloaded_file"
 
-                    val javaScript = """
-                        (function() {
-                            var url = '$escapedUrl';
-                            var mime = '$escapedMimeType';
-                            var name = '$escapedFileName';
-                            AndroidDownloadInterface.log('JS: Init blob fetch: ' + url);
-                            
-                            fetch(url)
-                                .then(function(res) {
-                                    AndroidDownloadInterface.log('JS: Fetch success. Converting to Blob...');
-                                    return res.blob();
-                                })
-                                .then(function(blob) {
-                                    AndroidDownloadInterface.log('JS: Blob captured. Size: ' + blob.size);
-                                    var reader = new FileReader();
-                                    reader.onloadend = function() {
-                                        var base64data = reader.result;
-                                        AndroidDownloadInterface.log('JS: Base64 processed. Byte size: ' + base64data.length);
-                                        AndroidDownloadInterface.processBase64(base64data, mime, name);
-                                    };
-                                    reader.onerror = function(err) {
-                                        AndroidDownloadInterface.log('JS: FileReader failed: ' + JSON.stringify(err));
-                                    };
-                                    reader.readAsDataURL(blob);
-                                })
-                                .catch(function(err) {
-                                    AndroidDownloadInterface.log('JS: Fetch failed: ' + err.message + '. Retrying with XHR.');
-                                    try {
-                                        var xhr = new XMLHttpRequest();
-                                        xhr.open('GET', url, true);
-                                        xhr.responseType = 'blob';
-                                        xhr.onload = function() {
-                                            AndroidDownloadInterface.log('JS: XHR finished. Status: ' + xhr.status);
-                                            if (xhr.status === 200 || xhr.status === 0) {
-                                                var reader = new FileReader();
-                                                reader.onloadend = function() {
-                                                    AndroidDownloadInterface.processBase64(reader.result, mime, name);
-                                                };
-                                                reader.readAsDataURL(xhr.response);
-                                            } else {
-                                                AndroidDownloadInterface.log('JS: XHR failed with status: ' + xhr.status);
-                                            }
+                        val javaScript = """
+                            (function() {
+                                var url = '$escapedUrl';
+                                var mime = '$escapedMimeType';
+                                var name = '$escapedFileName';
+                                AndroidDownloadInterface.log('JS: Init blob fetch: ' + url);
+                                
+                                fetch(url)
+                                    .then(function(res) {
+                                        AndroidDownloadInterface.log('JS: Fetch success. Converting to Blob...');
+                                        return res.blob();
+                                    })
+                                    .then(function(blob) {
+                                        AndroidDownloadInterface.log('JS: Blob captured. Size: ' + blob.size);
+                                        var reader = new FileReader();
+                                        reader.onloadend = function() {
+                                            var base64data = reader.result;
+                                            AndroidDownloadInterface.log('JS: Base64 processed. Byte size: ' + base64data.length);
+                                            AndroidDownloadInterface.processBase64(base64data, mime, name);
                                         };
-                                        xhr.onerror = function(err) {
-                                            AndroidDownloadInterface.log('JS: XHR load failed: ' + JSON.stringify(err));
+                                        reader.onerror = function(err) {
+                                            AndroidDownloadInterface.log('JS: FileReader failed: ' + JSON.stringify(err));
                                         };
-                                        xhr.send();
-                                    } catch(e) {
-                                        AndroidDownloadInterface.log('JS: XHR handler crashed: ' + e.message);
-                                    }
-                                });
-                        })();
-                    """.trimIndent()
+                                        reader.readAsDataURL(blob);
+                                    })
+                                    .catch(function(err) {
+                                        AndroidDownloadInterface.log('JS: Fetch failed: ' + err.message + '. Retrying with XHR.');
+                                        try {
+                                            var xhr = new XMLHttpRequest();
+                                            xhr.open('GET', url, true);
+                                            xhr.responseType = 'blob';
+                                            xhr.onload = function() {
+                                                AndroidDownloadInterface.log('JS: XHR finished. Status: ' + xhr.status);
+                                                if (xhr.status === 200 || xhr.status === 0) {
+                                                    var reader = new FileReader();
+                                                    reader.onloadend = function() {
+                                                        AndroidDownloadInterface.processBase64(reader.result, mime, name);
+                                                    };
+                                                    reader.readAsDataURL(xhr.response);
+                                                } else {
+                                                    AndroidDownloadInterface.log('JS: XHR failed with status: ' + xhr.status);
+                                                }
+                                            };
+                                            xhr.onerror = function(err) {
+                                                AndroidDownloadInterface.log('JS: XHR load failed: ' + JSON.stringify(err));
+                                            };
+                                            xhr.send();
+                                        } catch(e) {
+                                            AndroidDownloadInterface.log('JS: XHR handler crashed: ' + e.message);
+                                        }
+                                    });
+                            })();
+                        """.trimIndent()
 
-                    post {
-                        evaluateJavascript(javaScript, null)
+                        post {
+                            evaluateJavascript(javaScript, null)
+                        }
+
+                        Toast.makeText(
+                            applicationContext,
+                            "Processing blob download: $fileName",
+                            Toast.LENGTH_SHORT
+                        ).show()
                     }
-
-                    Toast.makeText(
-                        applicationContext,
-                        "Processing blob download: $fileName",
-                        Toast.LENGTH_SHORT
-                    ).show()
                 } else {
                     try {
                         val request = DownloadManager.Request(Uri.parse(url)).apply {
@@ -406,6 +441,38 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             }
 
             loadUrl(startUrl)
+        }
+    }
+
+    private fun injectBlobInterceptor(view: WebView?) {
+        val script = """
+            (function() {
+                if (window.__blob_interceptor_installed) return;
+                window.__blob_interceptor_installed = true;
+                
+                try {
+                    var originalCreateObjectURL = window.URL.createObjectURL;
+                    window.URL.createObjectURL = function(blob) {
+                        var url = originalCreateObjectURL.apply(this, arguments);
+                        if (blob instanceof Blob) {
+                            var reader = new FileReader();
+                            reader.onloadend = function() {
+                                var base64data = reader.result;
+                                var mime = blob.type || 'application/octet-stream';
+                                AndroidDownloadInterface.storeBlob(url, base64data, mime);
+                            };
+                            reader.readAsDataURL(blob);
+                        }
+                        return url;
+                     };
+                     AndroidDownloadInterface.log('Blob interceptor installed via page injection.');
+                } catch(e) {
+                    AndroidDownloadInterface.log('Failed to install Blob interceptor: ' + e.message);
+                }
+            })();
+        """.trimIndent()
+        view?.post {
+            view.evaluateJavascript(script, null)
         }
     }
 

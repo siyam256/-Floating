@@ -445,9 +445,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     super.onProgressChanged(view, newProgress)
-                    if (newProgress > 5) {
-                        injectBlobInterceptor(view)
-                    }
+                    injectBlobInterceptor(view)
                 }
 
                 override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
@@ -474,7 +472,17 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
+                    val targetUrl = request?.url?.toString() ?: return false
+                    if (targetUrl.startsWith("blob:")) {
+                        // Prevent actual page navigation to blob: URLs to keep page active
+                        return true
+                    }
                     return false
+                }
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    super.onPageCommitVisible(view, url)
+                    injectBlobInterceptor(view)
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
@@ -604,79 +612,90 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                     } catch(e) {}
                                     return list;
                                 }
-                                
-                                var frames = getAllFrames(window, []);
-                                var currentFrameIndex = 0;
-                                
-                                function attemptNextFrame() {
-                                    if (currentFrameIndex >= frames.length) {
-                                        log('JS: Blob fetch failed in all frames.');
-                                        return;
-                                    }
+
+                                function runFrameSearch() {
+                                    var frames = getAllFrames(window, []);
+                                    var currentFrameIndex = 0;
                                     
-                                    var f = frames[currentFrameIndex];
-                                    currentFrameIndex++;
-                                    
-                                    var isSameOrigin = isWindowSameOrigin(f);
-                                    
-                                    if (!isSameOrigin) {
-                                        log('JS: Skipping frame ' + (currentFrameIndex - 1) + ' due to cross-origin boundary');
-                                        attemptNextFrame();
-                                        return;
-                                    }
-                                    
-                                    log('JS: Attempting fetch in same-origin frame ' + (currentFrameIndex - 1));
-                                    try {
-                                        f.fetch(url)
-                                            .then(function(res) { 
-                                                log('JS: Fetch success in same-origin frame ' + (currentFrameIndex - 1));
-                                                return res.blob(); 
-                                            })
-                                            .then(function(blob) {
-                                                log('JS: Blob captured. Size: ' + blob.size);
-                                                var reader = new f.FileReader();
-                                                reader.onloadend = function() {
-                                                    var base64data = reader.result;
-                                                    log('JS: Converting blob to Base64 data...');
-                                                    sendBlobInChunks(base64data, mime, name);
-                                                };
-                                                reader.readAsDataURL(blob);
-                                            })
-                                            .catch(function(err) {
-                                                log('JS: Fetch in frame ' + (currentFrameIndex - 1) + ' failed: ' + err.message + '. Retrying with XHR inside frame.');
-                                                try {
-                                                    var xhr = new f.XMLHttpRequest();
-                                                    xhr.open('GET', url, true);
-                                                    xhr.responseType = 'blob';
-                                                    xhr.onload = function() {
-                                                        log('JS: XHR success in same-origin frame ' + (currentFrameIndex - 1) + '. Status: ' + xhr.status);
-                                                        if (xhr.status === 200 || xhr.status === 0) {
-                                                            var reader = new f.FileReader();
-                                                            reader.onloadend = function() {
-                                                                sendBlobInChunks(reader.result, mime, name);
-                                                            };
-                                                            reader.readAsDataURL(xhr.response);
-                                                        } else {
+                                    function attemptNextFrame() {
+                                        if (currentFrameIndex >= frames.length) {
+                                            log('JS: Blob fetch failed in all frames.');
+                                            return;
+                                        }
+                                        
+                                        var f = frames[currentFrameIndex];
+                                        currentFrameIndex++;
+                                        
+                                        var isSameOrigin = isWindowSameOrigin(f);
+                                        if (!isSameOrigin) {
+                                            attemptNextFrame();
+                                            return;
+                                        }
+                                        
+                                        log('JS: Attempting fetch in same-origin frame ' + (currentFrameIndex - 1));
+                                        try {
+                                            f.fetch(url)
+                                                .then(function(res) { 
+                                                    return res.blob(); 
+                                                })
+                                                .then(function(blob) {
+                                                    log('JS: Blob captured in frame ' + (currentFrameIndex - 1) + '. Size: ' + blob.size);
+                                                    var reader = new FileReader(); // Use top-frame FileReader
+                                                    reader.onloadend = function() {
+                                                        sendBlobInChunks(reader.result, mime || blob.type, name);
+                                                    };
+                                                    reader.readAsDataURL(blob);
+                                                })
+                                                .catch(function(err) {
+                                                    log('JS: Fetch in frame ' + (currentFrameIndex - 1) + ' failed: ' + err.message + '. Retrying with XHR.');
+                                                    try {
+                                                        var xhr = new f.XMLHttpRequest();
+                                                        xhr.open('GET', url, true);
+                                                        xhr.responseType = 'blob';
+                                                        xhr.onload = function() {
+                                                            if (xhr.status === 200 || xhr.status === 0) {
+                                                                var reader = new FileReader(); // Use top-frame FileReader
+                                                                reader.onloadend = function() {
+                                                                    sendBlobInChunks(reader.result, mime, name);
+                                                                };
+                                                                reader.readAsDataURL(xhr.response);
+                                                            } else {
+                                                                attemptNextFrame();
+                                                            }
+                                                        };
+                                                        xhr.onerror = function() {
                                                             attemptNextFrame();
-                                                        }
-                                                    };
-                                                    xhr.onerror = function() { 
-                                                        log('JS: XHR error in frame ' + (currentFrameIndex - 1));
-                                                        attemptNextFrame(); 
-                                                    };
-                                                    xhr.send();
-                                                } catch(e) {
-                                                    log('JS: Frame XHR crash: ' + e.message);
-                                                    attemptNextFrame();
-                                                }
-                                            });
-                                    } catch(e) {
-                                        log('JS: Frame fetch block crash: ' + e.message);
-                                        attemptNextFrame();
+                                                        };
+                                                        xhr.send();
+                                                    } catch(xhrErr) {
+                                                        attemptNextFrame();
+                                                    }
+                                                });
+                                        } catch(e) {
+                                            attemptNextFrame();
+                                        }
                                     }
+                                    attemptNextFrame();
                                 }
-                                
-                                attemptNextFrame();
+
+                                // Prioritize: fetch the blob directly in the top-level window context first
+                                log('JS: Fetching blob directly from top-level window context...');
+                                fetch(url)
+                                    .then(function(res) { 
+                                        log('JS: Direct top-level fetch success.');
+                                        return res.blob(); 
+                                    })
+                                    .then(function(blob) {
+                                        var reader = new FileReader();
+                                        reader.onloadend = function() {
+                                            sendBlobInChunks(reader.result, mime || blob.type, name);
+                                        };
+                                        reader.readAsDataURL(blob);
+                                    })
+                                    .catch(function(err) {
+                                        log('JS: Direct top-level fetch failed, searching frames. Error: ' + err.message);
+                                        runFrameSearch();
+                                    });
                             })();
                         """.trimIndent()
 
@@ -1084,7 +1103,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             } catch(eFrame) {}
                         }
                     } catch(e) {}
-                }, 1500);
+                }, 300);
 
             })();
         """.trimIndent()

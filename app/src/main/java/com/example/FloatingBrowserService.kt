@@ -288,7 +288,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             val contentValues = android.content.ContentValues().apply {
                                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, attemptName)
                                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNullOrBlank()) "application/octet-stream" else mimeType)
-                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
+                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
                                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                                 put(android.provider.MediaStore.MediaColumns.DATE_ADDED, System.currentTimeMillis() / 1000)
                                 put(android.provider.MediaStore.MediaColumns.TITLE, attemptName)
@@ -297,21 +297,29 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
                             val uri = resolver.insert(collectionUri, contentValues)
                             if (uri != null) {
-                                resolver.openOutputStream(uri)?.use { outputStream ->
-                                    outputStream.write(fileBytes)
-                                    outputStream.flush()
+                                try {
+                                    resolver.openOutputStream(uri)?.use { outputStream ->
+                                        outputStream.write(fileBytes)
+                                        outputStream.flush()
+                                    }
+                                    
+                                    val updateValues = android.content.ContentValues().apply {
+                                        put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+                                    }
+                                    resolver.update(uri, updateValues, null, null)
+                                    success = true
+                                    name = attemptName
+                                    android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore to Downloads: $name")
+                                } catch (e: Exception) {
+                                    android.util.Log.e("FloatingBrowser", "Failed to write bytes to MediaStore URI", e)
+                                    resolver.delete(uri, null, null) // Clean up the failed insert
+                                    throw e
                                 }
-                                contentValues.clear()
-                                contentValues.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
-                                resolver.update(uri, contentValues, null, null)
-                                success = true
-                                name = attemptName
-                                android.util.Log.d("FloatingBrowser", "Successfully downloaded file directly via MediaStore to /FloatingBrowser: $name")
                             } else {
                                 throw Exception("MediaStore insert returned null URI")
                             }
                         } catch (e: Exception) {
-                            android.util.Log.e("FloatingBrowser", "MediaStore insert failed for name=$attemptName, retriesLeft=$retries", e)
+                            android.util.Log.e("FloatingBrowser", "MediaStore insert failed for name=$attemptName, retriesLeft=$retries, error=${e.message}", e)
                             retries--
                             if (retries > 0) {
                                 val extIdx = name.lastIndexOf('.')

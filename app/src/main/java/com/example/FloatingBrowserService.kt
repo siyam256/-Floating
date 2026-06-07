@@ -85,6 +85,23 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private lateinit var params: WindowManager.LayoutParams
     private lateinit var webView: WebView
     private val blobDataMap = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String>>()
+    private val chunkedTransfers = java.util.concurrent.ConcurrentHashMap<String, ChunkedTransferSession>()
+    private val blobChunksMap = java.util.concurrent.ConcurrentHashMap<String, StoreBlobSession>()
+
+    class ChunkedTransferSession(
+        val fileName: String,
+        val mimeType: String,
+        val totalChunks: Int
+    ) {
+        val chunks = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    }
+
+    class StoreBlobSession(
+        val mimeType: String,
+        val totalChunks: Int
+    ) {
+        val chunks = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    }
 
     private var isExpanded by mutableStateOf(true)
     private var startUrl = "https://aistudio.google.com"
@@ -157,6 +174,82 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             val length = base64Data.length
             android.util.Log.d("FloatingBrowser", "Intercepted blob stored. URL: $url, MimeType: $mimeType, Size: $length")
             blobDataMap[url] = Pair(base64Data, mimeType)
+        }
+
+        @android.webkit.JavascriptInterface
+        fun initChunkedDownload(transferId: String, fileName: String, mimeType: String, totalChunks: Int) {
+            android.util.Log.d("FloatingBrowser", "Init chunked download: id=$transferId, name=$fileName, totalChunks=$totalChunks")
+            chunkedTransfers[transferId] = ChunkedTransferSession(fileName, mimeType, totalChunks)
+        }
+
+        @android.webkit.JavascriptInterface
+        fun appendChunk(transferId: String, chunkIndex: Int, chunkData: String) {
+            val session = chunkedTransfers[transferId]
+            if (session != null) {
+                session.chunks[chunkIndex] = chunkData
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun commitChunkedDownload(transferId: String) {
+            val session = chunkedTransfers[transferId] ?: return
+            android.util.Log.d("FloatingBrowser", "Commit chunked download: id=$transferId, receivedChunks=${session.chunks.size}/${session.totalChunks}")
+            Thread {
+                try {
+                    val sb = java.lang.StringBuilder()
+                    for (i in 0 until session.totalChunks) {
+                        val chunk = session.chunks[i]
+                        if (chunk != null) {
+                            sb.append(chunk)
+                        } else {
+                            android.util.Log.e("FloatingBrowser", "Missing chunk $i in transfer $transferId")
+                        }
+                    }
+                    val fullBase64 = sb.toString()
+                    processBase64(fullBase64, session.mimeType, session.fileName)
+                    chunkedTransfers.remove(transferId)
+                } catch (e: Exception) {
+                    android.util.Log.e("FloatingBrowser", "Failed to assemble chunked download", e)
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        Toast.makeText(context, "Assembly failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }.start()
+        }
+
+        @android.webkit.JavascriptInterface
+        fun initStoreBlob(url: String, mimeType: String, totalChunks: Int) {
+            blobChunksMap[url] = StoreBlobSession(mimeType, totalChunks)
+        }
+
+        @android.webkit.JavascriptInterface
+        fun appendStoreBlobChunk(url: String, chunkIndex: Int, chunkData: String) {
+            val session = blobChunksMap[url]
+            if (session != null) {
+                session.chunks[chunkIndex] = chunkData
+            }
+        }
+
+        @android.webkit.JavascriptInterface
+        fun commitStoreBlob(url: String) {
+            val session = blobChunksMap[url] ?: return
+            android.util.Log.d("FloatingBrowser", "Commit store blob: url=$url, receivedChunks=${session.chunks.size}/${session.totalChunks}")
+            Thread {
+                try {
+                    val sb = java.lang.StringBuilder()
+                    for (i in 0 until session.totalChunks) {
+                        val chunk = session.chunks[i]
+                        if (chunk != null) {
+                            sb.append(chunk)
+                        }
+                    }
+                    blobDataMap[url] = Pair(sb.toString(), session.mimeType)
+                    blobChunksMap.remove(url)
+                    android.util.Log.d("FloatingBrowser", "Successfully reconstructed blob in memory")
+                } catch (e: Exception) {
+                    android.util.Log.e("FloatingBrowser", "Failed to assemble stored blob", e)
+                }
+            }.start()
         }
 
         @android.webkit.JavascriptInterface
@@ -359,6 +452,25 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                 var name = '$escapedFileName';
                                 AndroidDownloadInterface.log('JS: Init recursive frame blob fetch for: ' + url);
                                 
+                                function sendBlobInChunks(base64Data, mime, filename) {
+                                    try {
+                                        var chunkSize = 200000;
+                                        var totalChunks = Math.ceil(base64Data.length / chunkSize);
+                                        var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                                        
+                                        AndroidDownloadInterface.initChunkedDownload(transferId, filename, mime, totalChunks);
+                                        for (var i = 0; i < totalChunks; i++) {
+                                            var start = i * chunkSize;
+                                            var end = Math.min(start + chunkSize, base64Data.length);
+                                            var chunk = base64Data.substring(start, end);
+                                            AndroidDownloadInterface.appendChunk(transferId, i, chunk);
+                                        }
+                                        AndroidDownloadInterface.commitChunkedDownload(transferId);
+                                    } catch(e) {
+                                        AndroidDownloadInterface.log('Chunked transfer crash: ' + e.message);
+                                    }
+                                }
+                                
                                 function getAllFrames(win, list) {
                                     if (!win) return list;
                                     list.push(win);
@@ -414,7 +526,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                 reader.onloadend = function() {
                                                     var base64data = reader.result;
                                                     AndroidDownloadInterface.log('JS: Converting blob to Base64 data...');
-                                                    AndroidDownloadInterface.processBase64(base64data, mime, name);
+                                                    sendBlobInChunks(base64data, mime, name);
                                                 };
                                                 reader.readAsDataURL(blob);
                                             })
@@ -429,7 +541,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                         if (xhr.status === 200 || xhr.status === 0) {
                                                             var reader = new f.FileReader();
                                                             reader.onloadend = function() {
-                                                                AndroidDownloadInterface.processBase64(reader.result, mime, name);
+                                                                sendBlobInChunks(reader.result, mime, name);
                                                             };
                                                             reader.readAsDataURL(xhr.response);
                                                         } else {
@@ -506,6 +618,43 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private fun injectBlobInterceptor(view: WebView?) {
         val script = """
             (function() {
+                function sendBlobInChunks(base64Data, mime, filename) {
+                    try {
+                        var chunkSize = 200000;
+                        var totalChunks = Math.ceil(base64Data.length / chunkSize);
+                        var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                        
+                        AndroidDownloadInterface.initChunkedDownload(transferId, filename, mime, totalChunks);
+                        for (var i = 0; i < totalChunks; i++) {
+                            var start = i * chunkSize;
+                            var end = Math.min(start + chunkSize, base64Data.length);
+                            var chunk = base64Data.substring(start, end);
+                            AndroidDownloadInterface.appendChunk(transferId, i, chunk);
+                        }
+                        AndroidDownloadInterface.commitChunkedDownload(transferId);
+                    } catch(e) {
+                        AndroidDownloadInterface.log('Chunked transfer crash: ' + e.message);
+                    }
+                }
+
+                function storeBlobInChunks(url, base64Data, mime) {
+                    try {
+                        var chunkSize = 200000;
+                        var totalChunks = Math.ceil(base64Data.length / chunkSize);
+                        
+                        AndroidDownloadInterface.initStoreBlob(url, mime, totalChunks);
+                        for (var i = 0; i < totalChunks; i++) {
+                            var start = i * chunkSize;
+                            var end = Math.min(start + chunkSize, base64Data.length);
+                            var chunk = base64Data.substring(start, end);
+                            AndroidDownloadInterface.appendStoreBlobChunk(url, i, chunk);
+                        }
+                        AndroidDownloadInterface.commitStoreBlob(url);
+                    } catch(e) {
+                        AndroidDownloadInterface.log('storeBlob chunked transfer crash: ' + e.message);
+                    }
+                }
+
                 function installInterceptor(win) {
                     try {
                         if (!win || win.__blob_interceptor_installed) return;
@@ -523,7 +672,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                         reader.onloadend = function() {
                                             var base64data = reader.result;
                                             var mime = blob.type || 'application/octet-stream';
-                                            AndroidDownloadInterface.storeBlob(url, base64data, mime);
+                                            storeBlobInChunks(url, base64data, mime);
                                         };
                                         reader.onerror = function() {
                                             AndroidDownloadInterface.log('Reader error in URL.createObjectURL');
@@ -548,7 +697,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                         .then(function(blob) {
                                             var reader = new win.FileReader();
                                             reader.onloadend = function() {
-                                                AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', 'downloaded_file');
+                                                sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', 'downloaded_file');
                                             };
                                             reader.readAsDataURL(blob);
                                         })
@@ -577,7 +726,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             .then(function(blob) {
                                                 var reader = new win.FileReader();
                                                 reader.onloadend = function() {
-                                                    AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', filename);
+                                                    sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
                                                 };
                                                 reader.readAsDataURL(blob);
                                             })
@@ -611,7 +760,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             .then(function(blob) {
                                                 var reader = new win.FileReader();
                                                 reader.onloadend = function() {
-                                                    AndroidDownloadInterface.processBase64(reader.result, blob.type || 'application/octet-stream', filename);
+                                                    sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
                                                 };
                                                 reader.readAsDataURL(blob);
                                             })

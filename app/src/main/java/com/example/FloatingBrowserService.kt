@@ -617,41 +617,77 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
     private fun injectBlobInterceptor(view: WebView?) {
         val script = """
-            (function() {
+            (function main() {
+                var scriptCode = "(" + main.toString() + ")();";
+
+                function log(msg) {
+                    if (window.AndroidDownloadInterface && window.AndroidDownloadInterface.log) {
+                        window.AndroidDownloadInterface.log(msg);
+                    } else {
+                        console.log("Interceptor: " + msg);
+                    }
+                }
+
                 function sendBlobInChunks(base64Data, mime, filename) {
                     try {
+                        if (!window.AndroidDownloadInterface) {
+                            log("Android interface not available for download");
+                            return;
+                        }
                         var chunkSize = 200000;
                         var totalChunks = Math.ceil(base64Data.length / chunkSize);
                         var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
                         
-                        AndroidDownloadInterface.initChunkedDownload(transferId, filename, mime, totalChunks);
+                        window.AndroidDownloadInterface.initChunkedDownload(transferId, filename, mime, totalChunks);
                         for (var i = 0; i < totalChunks; i++) {
                             var start = i * chunkSize;
                             var end = Math.min(start + chunkSize, base64Data.length);
                             var chunk = base64Data.substring(start, end);
-                            AndroidDownloadInterface.appendChunk(transferId, i, chunk);
+                            window.AndroidDownloadInterface.appendChunk(transferId, i, chunk);
                         }
-                        AndroidDownloadInterface.commitChunkedDownload(transferId);
+                        window.AndroidDownloadInterface.commitChunkedDownload(transferId);
                     } catch(e) {
-                        AndroidDownloadInterface.log('Chunked transfer crash: ' + e.message);
+                        log('Chunked transfer crash: ' + e.message);
                     }
                 }
 
                 function storeBlobInChunks(url, base64Data, mime) {
                     try {
+                        if (!window.AndroidDownloadInterface) return;
                         var chunkSize = 200000;
                         var totalChunks = Math.ceil(base64Data.length / chunkSize);
                         
-                        AndroidDownloadInterface.initStoreBlob(url, mime, totalChunks);
+                        window.AndroidDownloadInterface.initStoreBlob(url, mime, totalChunks);
                         for (var i = 0; i < totalChunks; i++) {
                             var start = i * chunkSize;
                             var end = Math.min(start + chunkSize, base64Data.length);
                             var chunk = base64Data.substring(start, end);
-                            AndroidDownloadInterface.appendStoreBlobChunk(url, i, chunk);
+                            window.AndroidDownloadInterface.appendStoreBlobChunk(url, i, chunk);
                         }
-                        AndroidDownloadInterface.commitStoreBlob(url);
+                        window.AndroidDownloadInterface.commitStoreBlob(url);
                     } catch(e) {
-                        AndroidDownloadInterface.log('storeBlob chunked transfer crash: ' + e.message);
+                        log('storeBlob chunked transfer crash: ' + e.message);
+                    }
+                }
+
+                function injectScriptIntoHtml(html) {
+                    try {
+                        var scriptTag = '<script>' + scriptCode + '<\/script>';
+                        var idx = html.toLowerCase().indexOf('<head>');
+                        if (idx !== -1) {
+                            return html.substring(0, idx + 6) + scriptTag + html.substring(idx + 6);
+                        }
+                        idx = html.toLowerCase().indexOf('<html>');
+                        if (idx !== -1) {
+                            return html.substring(0, idx + 6) + scriptTag + html.substring(idx + 6);
+                        }
+                        idx = html.toLowerCase().indexOf('<body>');
+                        if (idx !== -1) {
+                            return html.substring(0, idx) + scriptTag + html.substring(idx);
+                        }
+                        return scriptTag + html;
+                    } catch (e) {
+                        return html;
                     }
                 }
 
@@ -659,12 +695,13 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     try {
                         if (!win || win.__blob_interceptor_installed) return;
                         win.__blob_interceptor_installed = true;
-                        
+
+                        log('Installing Blob interceptor in frame: ' + (win.location ? win.location.href : 'unknown'));
+
                         // 1. Intercept URL.createObjectURL
                         if (win.URL && win.URL.createObjectURL) {
                             var originalCreateObjectURL = win.URL.createObjectURL;
                             win.URL.createObjectURL = function(blob) {
-                                // Prevent Illegal Invocation by calling on win.URL context
                                 var url = originalCreateObjectURL.call(win.URL, blob);
                                 if (blob) {
                                     try {
@@ -674,23 +711,20 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             var mime = blob.type || 'application/octet-stream';
                                             storeBlobInChunks(url, base64data, mime);
                                         };
-                                        reader.onerror = function() {
-                                            AndroidDownloadInterface.log('Reader error in URL.createObjectURL');
-                                        };
                                         reader.readAsDataURL(blob);
                                     } catch (err) {
-                                        AndroidDownloadInterface.log('createObjectURL convert error: ' + err.message);
+                                        log('createObjectURL convert error: ' + err.message);
                                     }
                                 }
                                 return url;
-                             };
+                            };
                         }
-                        
+
                         // 2. Intercept window.open
                         var originalOpen = win.open;
                         win.open = function(url, target, features) {
                             if (url && url.substring(0, 5) === 'blob:') {
-                                AndroidDownloadInterface.log('window.open intercepted for blob: ' + url);
+                                log('window.open intercepted for blob: ' + url);
                                 try {
                                     win.fetch(url)
                                         .then(function(res) { return res.blob(); })
@@ -702,10 +736,10 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             reader.readAsDataURL(blob);
                                         })
                                         .catch(function(err) {
-                                            AndroidDownloadInterface.log('window.open fetch failed: ' + err.message);
+                                            log('window.open fetch failed: ' + err.message);
                                         });
                                 } catch(e) {
-                                    AndroidDownloadInterface.log('window.open hander crash: ' + e.message);
+                                    log('window.open handler crash: ' + e.message);
                                 }
                                 return null;
                             }
@@ -719,7 +753,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                 var href = this.href;
                                 if (href && href.substring(0, 5) === 'blob:') {
                                     var filename = this.download || 'downloaded_file';
-                                    AndroidDownloadInterface.log('Anchor prototype click() intercepted: ' + href);
+                                    log('Anchor prototype click() intercepted: ' + href);
                                     try {
                                         win.fetch(href)
                                             .then(function(res) { return res.blob(); })
@@ -731,10 +765,10 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                 reader.readAsDataURL(blob);
                                             })
                                             .catch(function(err) {
-                                                AndroidDownloadInterface.log('Anchor prototype click fetch failed: ' + err.message);
+                                                log('Anchor prototype click fetch failed: ' + err.message);
                                             });
                                     } catch(e) {
-                                        AndroidDownloadInterface.log('Anchor prototype click handler crash: ' + e.message);
+                                        log('Anchor prototype click handler crash: ' + e.message);
                                     }
                                     return;
                                 }
@@ -753,7 +787,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                 if (target && target.tagName === 'A' && target.href && target.href.substring(0, 5) === 'blob:') {
                                     var url = target.href;
                                     var filename = target.download || 'downloaded_file';
-                                    AndroidDownloadInterface.log('DOM click intercepted for blob URL: ' + url);
+                                    log('DOM click intercepted for blob URL: ' + url);
                                     try {
                                         win.fetch(url)
                                             .then(function(res) { return res.blob(); })
@@ -765,33 +799,108 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                                 reader.readAsDataURL(blob);
                                             })
                                             .catch(function(err) {
-                                                AndroidDownloadInterface.log('DOM click fetch failed: ' + err.message);
+                                                log('DOM click fetch failed: ' + err.message);
                                             });
                                     } catch(err2) {
-                                        AndroidDownloadInterface.log('DOM click crash: ' + err2.message);
+                                        log('DOM click crash: ' + err2.message);
                                     }
                                 }
                             }, true);
                         }
 
-                        AndroidDownloadInterface.log('Blob interceptor installed inside window/frame: ' + (win.location ? win.location.href : 'unknown'));
                     } catch(e) {
-                         AndroidDownloadInterface.log('Failed to install Blob interceptor in frame: ' + e.message);
+                         log('Failed to install Blob interceptor in frame: ' + e.message);
                     }
-                    
+                }
+
+                // Install on current window immediately
+                installInterceptor(window);
+
+                // Patch creation and setter of elements to hook dynamic/iframe loading dynamically
+                try {
+                    if (window.HTMLIFrameElement) {
+                        var descriptor = Object.getOwnPropertyDescriptor(window.HTMLIFrameElement.prototype, 'srcdoc');
+                        if (descriptor && descriptor.set) {
+                            var originalSet = descriptor.set;
+                            Object.defineProperty(window.HTMLIFrameElement.prototype, 'srcdoc', {
+                                configurable: true,
+                                enumerable: true,
+                                get: descriptor.get,
+                                set: function(val) {
+                                    log('Intercepted srcdoc setter write');
+                                    if (typeof val === 'string') {
+                                        val = injectScriptIntoHtml(val);
+                                    }
+                                    return originalSet.call(this, val);
+                                }
+                            });
+                        }
+                    }
+                } catch(e) {
+                    log('Failed to patch srcdoc property: ' + e.message);
+                }
+
+                try {
+                    var originalSetAttribute = window.Element.prototype.setAttribute;
+                    window.Element.prototype.setAttribute = function(name, val) {
+                        if (name && name.toLowerCase() === 'srcdoc' && typeof val === 'string') {
+                            log('Intercepted setAttribute for srcdoc');
+                            val = injectScriptIntoHtml(val);
+                        }
+                        return originalSetAttribute.call(this, name, val);
+                    };
+                } catch(e) {
+                    log('Failed to patch setAttribute: ' + e.message);
+                }
+
+                try {
+                    var originalWrite = window.Document.prototype.write;
+                    window.Document.prototype.write = function() {
+                        log('Intercepted document.write');
+                        if (arguments.length > 0 && typeof arguments[0] === 'string') {
+                            arguments[0] = injectScriptIntoHtml(arguments[0]);
+                        }
+                        return originalWrite.apply(this, arguments);
+                    };
+
+                    var originalWriteln = window.Document.prototype.writeln;
+                    window.Document.prototype.writeln = function() {
+                        log('Intercepted document.writeln');
+                        if (arguments.length > 0 && typeof arguments[0] === 'string') {
+                            arguments[0] = injectScriptIntoHtml(arguments[0]);
+                        }
+                        return originalWriteln.apply(this, arguments);
+                    };
+                } catch(e) {
+                    log('Failed to patch document.write: ' + e.message);
+                }
+
+                // Check same-origin frames recursively (as a fallback)
+                try {
+                    for (var i = 0; i < window.frames.length; i++) {
+                        try {
+                            var f = window.frames[i];
+                            if (f && f.location && f.location.host) {
+                                installInterceptor(f);
+                            }
+                        } catch(eFrame) {}
+                    }
+                } catch(e) {}
+
+                // In case there are late loaders, install interceptor periodically on same-origin window frames
+                setInterval(function() {
                     try {
-                        for (var i = 0; i < win.frames.length; i++) {
-                            installInterceptor(win.frames[i]);
+                        for (var i = 0; i < window.frames.length; i++) {
+                            try {
+                                var f = window.frames[i];
+                                if (f && f.location && f.location.host) {
+                                    installInterceptor(f);
+                                }
+                            } catch(eFrame) {}
                         }
                     } catch(e) {}
-                }
-                
-                installInterceptor(window);
-                
-                // Periodically install on dynamic/late-loaded iframe frames
-                setInterval(function() {
-                    installInterceptor(window);
-                }, 1000);
+                }, 1500);
+
             })();
         """.trimIndent()
         view?.post {

@@ -477,8 +477,18 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     return false
                 }
 
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    injectBlobInterceptor(view)
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    injectBlobInterceptor(view)
+                }
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    super.onPageCommitVisible(view, url)
                     injectBlobInterceptor(view)
                 }
             }
@@ -741,6 +751,179 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 }
                 window.__blob_interceptor_loaded = true;
 
+                // String representation of our robust sandboxed iframe interceptor script.
+                // Doing this dynamically ensures syntax safety without manual backslash hell.
+                var iframeScriptCode = "(" + (function() {
+                    if (window.__blob_interceptor_iframe_loaded) return;
+                    window.__blob_interceptor_iframe_loaded = true;
+
+                    function getBridge() {
+                        try {
+                            if (window.AndroidDownloadInterface) return window.AndroidDownloadInterface;
+                        } catch(e) {}
+                        return null;
+                    }
+
+                    function log(msg) {
+                        try {
+                            var b = getBridge();
+                            if (b && b.log) b.log("IFrame: " + msg);
+                        } catch(e) {}
+                    }
+
+                    log("Loaded inside sandboxed iframe");
+
+                    function storeBlobInChunks(url, base64Data, mime) {
+                        try {
+                            var bridge = getBridge();
+                            if (!bridge) {
+                                setTimeout(function() { storeBlobInChunks(url, base64Data, mime); }, 150);
+                                return;
+                            }
+                            var chunkSize = 200000;
+                            var totalChunks = Math.ceil(base64Data.length / chunkSize);
+                            bridge.initStoreBlob(url, mime, totalChunks);
+                            for (var i = 0; i < totalChunks; i++) {
+                                var start = i * chunkSize;
+                                var end = Math.min(start + chunkSize, base64Data.length);
+                                var chunk = base64Data.substring(start, end);
+                                bridge.appendStoreBlobChunk(url, i, chunk);
+                            }
+                            bridge.commitStoreBlob(url);
+                        } catch(e) {
+                            log("storeBlob error: " + e.message);
+                        }
+                    }
+
+                    function sendBlobInChunks(base64Data, mime, filename) {
+                        try {
+                            var bridge = getBridge();
+                            if (!bridge) {
+                                setTimeout(function() { sendBlobInChunks(base64Data, mime, filename); }, 150);
+                                return;
+                            }
+                            var chunkSize = 200000;
+                            var totalChunks = Math.ceil(base64Data.length / chunkSize);
+                            var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                            bridge.initChunkedDownload(transferId, filename, mime, totalChunks);
+                            for (var i = 0; i < totalChunks; i++) {
+                                var start = i * chunkSize;
+                                var end = Math.min(start + chunkSize, base64Data.length);
+                                var chunk = base64Data.substring(start, end);
+                                bridge.appendChunk(transferId, i, chunk);
+                            }
+                            bridge.commitChunkedDownload(transferId);
+                        } catch(e) {
+                            log('Chunked transfer error: ' + e.message);
+                        }
+                    }
+
+                    if (window.URL && window.URL.createObjectURL) {
+                        var originalCreateObjectURL = window.URL.createObjectURL;
+                        window.URL.createObjectURL = function(blob) {
+                            var url = originalCreateObjectURL.call(window.URL, blob);
+                            if (blob) {
+                                try {
+                                    var reader = new FileReader();
+                                    reader.onloadend = function() {
+                                        var base64data = reader.result;
+                                        var mime = blob.type || 'application/octet-stream';
+                                        storeBlobInChunks(url, base64data, mime);
+                                    };
+                                    reader.readAsDataURL(blob);
+                                } catch (err) {
+                                    log('createObjectURL convert error: ' + err.message);
+                                }
+                            }
+                            return url;
+                        };
+                    }
+
+                    var originalOpen = window.open;
+                    window.open = function(url, target, features) {
+                        if (url && url.substring(0, 5) === 'blob:') {
+                            try {
+                                fetch(url)
+                                    .then(function(res) { return res.blob(); })
+                                    .then(function(blob) {
+                                        var reader = new FileReader();
+                                        reader.onloadend = function() {
+                                            sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', 'downloaded_file');
+                                        };
+                                        reader.readAsDataURL(blob);
+                                    })
+                                    .catch(function(err) {
+                                        log('window.open fetch error: ' + err.message);
+                                    });
+                            } catch(e) {
+                                log('window.open error: ' + e.message);
+                            }
+                            return null;
+                        }
+                        return originalOpen.apply(this, arguments);
+                    };
+
+                    if (window.HTMLAnchorElement && window.HTMLAnchorElement.prototype) {
+                        var originalClick = window.HTMLAnchorElement.prototype.click;
+                        window.HTMLAnchorElement.prototype.click = function() {
+                            var href = this.href;
+                            if (href && href.substring(0, 5) === 'blob:') {
+                                var filename = this.download || 'downloaded_file';
+                                try {
+                                    fetch(href)
+                                        .then(function(res) { return res.blob(); })
+                                        .then(function(blob) {
+                                            var reader = new FileReader();
+                                            reader.onloadend = function() {
+                                                sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
+                                            };
+                                            reader.readAsDataURL(blob);
+                                        })
+                                        .catch(function(err) {
+                                            log('Anchor click fetch error: ' + err.message);
+                                        });
+                                } catch(e) {
+                                    log('Anchor click error: ' + e.message);
+                                }
+                                return;
+                            }
+                            return originalClick.apply(this, arguments);
+                        };
+                    }
+
+                    if (window.document) {
+                        window.document.addEventListener('click', function(e) {
+                            var target = e.target;
+                            while (target && target.nodeName !== 'A') {
+                                target = target.parentNode;
+                                if (!target) break;
+                            }
+                            if (target && target.nodeName === 'A' && target.href && target.href.substring(0, 5) === 'blob:') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                var url = target.href;
+                                var filename = target.download || 'downloaded_file';
+                                try {
+                                    fetch(url)
+                                        .then(function(res) { return res.blob(); })
+                                        .then(function(blob) {
+                                            var reader = new FileReader();
+                                            reader.onloadend = function() {
+                                                sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
+                                            };
+                                            reader.readAsDataURL(blob);
+                                        })
+                                        .catch(function(err) {
+                                            log('document click fetch error: ' + err.message);
+                                        });
+                                } catch(err2) {
+                                    log('document click error: ' + err2.message);
+                                }
+                            }
+                        }, true);
+                    }
+                }).toString() + ")();";
+
                 function isWindowSameOrigin(win) {
                     try {
                         var dummy = win.document;
@@ -776,84 +959,12 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                     }
                 }
 
-                // Register postMessage handler on the top window to bridge cross-origin iframe data
-                if (window === window.top) {
-                    window.addEventListener('message', function(event) {
-                        try {
-                            if (!event.data || typeof event.data !== 'object') return;
-                            if (event.data.type === 'BLOB_STORE') {
-                                log('Received BLOB_STORE message from iframe. URL: ' + event.data.url);
-                                storeBlobInChunks(event.data.url, event.data.base64, event.data.mime);
-                            } else if (event.data.type === 'BLOB_DOWNLOAD') {
-                                log('Received BLOB_DOWNLOAD message from iframe. Filename: ' + event.data.filename);
-                                sendBlobInChunks(event.data.base64, event.data.mime, event.data.filename);
-                            }
-                        } catch (ePost) {
-                            log('postMessage top handler error: ' + ePost.message);
-                        }
-                    }, false);
-                }
-
-                function sendBlobInChunks(base64Data, mime, filename) {
+                function injectIframeScript(html) {
                     try {
-                        var bridge = getAndroidInterface();
-                        if (!bridge) {
-                            log("Android interface not available locally. Broadcasting via postMessage to top window...");
-                            if (window.top && window.top !== window) {
-                                window.top.postMessage({
-                                    type: 'BLOB_DOWNLOAD',
-                                    base64: base64Data,
-                                    mime: mime,
-                                    filename: filename
-                                }, '*');
-                            }
-                            return;
-                        }
-                        var chunkSize = 200000;
-                        var totalChunks = Math.ceil(base64Data.length / chunkSize);
-                        var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
-                        
-                        bridge.initChunkedDownload(transferId, filename, mime, totalChunks);
-                        for (var i = 0; i < totalChunks; i++) {
-                            var start = i * chunkSize;
-                            var end = Math.min(start + chunkSize, base64Data.length);
-                            var chunk = base64Data.substring(start, end);
-                            bridge.appendChunk(transferId, i, chunk);
-                        }
-                        bridge.commitChunkedDownload(transferId);
-                    } catch(e) {
-                        log('Chunked transfer crash: ' + e.message);
-                    }
-                }
-
-                function storeBlobInChunks(url, base64Data, mime) {
-                    try {
-                        var bridge = getAndroidInterface();
-                        if (!bridge) {
-                            log("Android interface not available locally for storing. Delegating storage to top window...");
-                            if (window.top && window.top !== window) {
-                                window.top.postMessage({
-                                    type: 'BLOB_STORE',
-                                    url: url,
-                                    base64: base64Data,
-                                    mime: mime
-                                }, '*');
-                            }
-                            return;
-                        }
-                        var chunkSize = 200000;
-                        var totalChunks = Math.ceil(base64Data.length / chunkSize);
-                        
-                        bridge.initStoreBlob(url, mime, totalChunks);
-                        for (var i = 0; i < totalChunks; i++) {
-                            var start = i * chunkSize;
-                            var end = Math.min(start + chunkSize, base64Data.length);
-                            var chunk = base64Data.substring(start, end);
-                            bridge.appendStoreBlobChunk(url, i, chunk);
-                        }
-                        bridge.commitStoreBlob(url);
-                    } catch(e) {
-                        log('storeBlob chunked transfer crash: ' + e.message);
+                        var scriptTag = '<script>' + iframeScriptCode + '<' + '/script>';
+                        return scriptTag + html;
+                    } catch (e) {
+                        return html;
                     }
                 }
 
@@ -877,7 +988,21 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                         reader.onloadend = function() {
                                             var base64data = reader.result;
                                             var mime = blob.type || 'application/octet-stream';
-                                            storeBlobInChunks(url, base64data, mime);
+                                            
+                                            // Call Top-Level storeBlobInChunks helper
+                                            var b = getAndroidInterface();
+                                            if (b) {
+                                                var chunkSize = 200000;
+                                                var totalChunks = Math.ceil(base64data.length / chunkSize);
+                                                b.initStoreBlob(url, mime, totalChunks);
+                                                for (var i = 0; i < totalChunks; i++) {
+                                                    var start = i * chunkSize;
+                                                    var end = Math.min(start + chunkSize, base64data.length);
+                                                    var chunk = base64data.substring(start, end);
+                                                    b.appendStoreBlobChunk(url, i, chunk);
+                                                }
+                                                b.commitStoreBlob(url);
+                                            }
                                         };
                                         reader.readAsDataURL(blob);
                                     } catch (err) {
@@ -899,7 +1024,20 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                         .then(function(blob) {
                                             var reader = new win.FileReader();
                                             reader.onloadend = function() {
-                                                sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', 'downloaded_file');
+                                                var base64 = reader.result;
+                                                var b = getAndroidInterface();
+                                                if (b) {
+                                                    var chunkSize = 200000;
+                                                    var totalChunks = Math.ceil(base64.length / chunkSize);
+                                                    var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                                                    b.initChunkedDownload(transferId, 'downloaded_file', blob.type || 'application/octet-stream', totalChunks);
+                                                    for (var i = 0; i < totalChunks; i++) {
+                                                        var start = i * chunkSize;
+                                                        var end = Math.min(start + chunkSize, base64.length);
+                                                        b.appendChunk(transferId, i, base64.substring(start, end));
+                                                    }
+                                                    b.commitChunkedDownload(transferId);
+                                                }
                                             };
                                             reader.readAsDataURL(blob);
                                         })
@@ -928,7 +1066,20 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             .then(function(blob) {
                                                 var reader = new win.FileReader();
                                                 reader.onloadend = function() {
-                                                    sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
+                                                    var base64 = reader.result;
+                                                    var b = getAndroidInterface();
+                                                    if (b) {
+                                                        var chunkSize = 200000;
+                                                        var totalChunks = Math.ceil(base64.length / chunkSize);
+                                                        var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                                                        b.initChunkedDownload(transferId, filename, blob.type || 'application/octet-stream', totalChunks);
+                                                        for (var i = 0; i < totalChunks; i++) {
+                                                            var start = i * chunkSize;
+                                                            var end = Math.min(start + chunkSize, base64.length);
+                                                            b.appendChunk(transferId, i, base64.substring(start, end));
+                                                        }
+                                                        b.commitChunkedDownload(transferId);
+                                                    }
                                                 };
                                                 reader.readAsDataURL(blob);
                                             })
@@ -964,7 +1115,20 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                                             .then(function(blob) {
                                                 var reader = new win.FileReader();
                                                 reader.onloadend = function() {
-                                                    sendBlobInChunks(reader.result, blob.type || 'application/octet-stream', filename);
+                                                    var base64 = reader.result;
+                                                    var b = getAndroidInterface();
+                                                    if (b) {
+                                                        var chunkSize = 200000;
+                                                        var totalChunks = Math.ceil(base64.length / chunkSize);
+                                                        var transferId = 'trans_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+                                                        b.initChunkedDownload(transferId, filename, blob.type || 'application/octet-stream', totalChunks);
+                                                        for (var i = 0; i < totalChunks; i++) {
+                                                            var start = i * chunkSize;
+                                                            var end = Math.min(start + chunkSize, base64.length);
+                                                            b.appendChunk(transferId, i, base64.substring(start, end));
+                                                        }
+                                                        b.commitChunkedDownload(transferId);
+                                                    }
                                                 };
                                                 reader.readAsDataURL(blob);
                                             })
@@ -985,6 +1149,43 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
                 // Install on current window immediately
                 installInterceptor(window);
+
+                // Safe and secure hijacking of dynamic iframe creation / srcdoc writes
+                try {
+                    if (window.HTMLIFrameElement) {
+                        var descriptor = Object.getOwnPropertyDescriptor(window.HTMLIFrameElement.prototype, 'srcdoc');
+                        if (descriptor && descriptor.set) {
+                            var originalSet = descriptor.set;
+                            Object.defineProperty(window.HTMLIFrameElement.prototype, 'srcdoc', {
+                                configurable: true,
+                                enumerable: true,
+                                get: descriptor.get,
+                                set: function(val) {
+                                    log('Intercepted iframe srcdoc write safely');
+                                    if (typeof val === 'string') {
+                                        val = injectIframeScript(val);
+                                    }
+                                    return originalSet.call(this, val);
+                                }
+                            });
+                        }
+                    }
+                } catch(e) {
+                    log('Failed to patch srcdoc property: ' + e.message);
+                }
+
+                try {
+                    var originalSetAttribute = window.Element.prototype.setAttribute;
+                    window.Element.prototype.setAttribute = function(name, val) {
+                        if (name && name.toLowerCase() === 'srcdoc' && typeof val === 'string') {
+                            log('Intercepted setAttribute for srcdoc safely');
+                            val = injectIframeScript(val);
+                        }
+                        return originalSetAttribute.call(this, name, val);
+                    };
+                } catch(e) {
+                    log('Failed to patch setAttribute: ' + e.message);
+                }
 
                 // Check same-origin frames recursively (as a fallback)
                 try {

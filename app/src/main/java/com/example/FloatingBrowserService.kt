@@ -288,7 +288,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             val contentValues = android.content.ContentValues().apply {
                                 put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, attemptName)
                                 put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNullOrBlank()) "application/octet-stream" else mimeType)
-                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
+                                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
                                 put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
                             }
                             

@@ -749,6 +749,11 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     private fun injectBlobInterceptor(view: WebView?) {
         val script = """
             (function main() {
+                if (window.__blob_interceptor_loaded) {
+                    return;
+                }
+                window.__blob_interceptor_loaded = true;
+
                 var scriptCode = "(" + main.toString() + ")();";
 
                 function isWindowSameOrigin(win) {
@@ -1103,7 +1108,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                             } catch(eFrame) {}
                         }
                     } catch(e) {}
-                }, 300);
+                }, 1000);
 
             })();
         """.trimIndent()

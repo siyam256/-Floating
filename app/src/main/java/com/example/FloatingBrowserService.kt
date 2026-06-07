@@ -91,9 +91,12 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
     class ChunkedTransferSession(
         val fileName: String,
         val mimeType: String,
-        val totalChunks: Int
+        val totalChunks: Int,
+        var outputStream: java.io.OutputStream? = null,
+        var uri: Uri? = null,
+        var buffer: String = ""
     ) {
-        val chunks = java.util.concurrent.ConcurrentHashMap<Int, String>()
+        val chunksReceived = java.util.concurrent.atomic.AtomicInteger(0)
     }
 
     class StoreBlobSession(
@@ -178,43 +181,87 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
         @android.webkit.JavascriptInterface
         fun initChunkedDownload(transferId: String, fileName: String, mimeType: String, totalChunks: Int) {
-            android.util.Log.d("FloatingBrowser", "Init chunked download: id=$transferId, name=$fileName, totalChunks=$totalChunks")
-            chunkedTransfers[transferId] = ChunkedTransferSession(fileName, mimeType, totalChunks)
+            android.util.Log.d("FloatingBrowser", "Init chunked download (streaming): id=$transferId, name=$fileName, totalChunks=$totalChunks")
+            
+            try {
+                // Initialize MediaStore entry here to get URI
+                val resolver = context.contentResolver
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.MediaColumns.MIME_TYPE, if (mimeType.isNullOrBlank()) "application/octet-stream" else mimeType)
+                    put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS + "/FloatingBrowser")
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                
+                val collectionUri = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                val uri = resolver.insert(collectionUri, contentValues)
+                if (uri != null) {
+                    val outputStream = resolver.openOutputStream(uri)
+                    chunkedTransfers[transferId] = ChunkedTransferSession(fileName, mimeType, totalChunks, outputStream, uri)
+                } else {
+                    android.util.Log.e("FloatingBrowser", "Failed to create MediaStore entry for $fileName")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingBrowser", "Failed to init streaming download", e)
+            }
         }
 
         @android.webkit.JavascriptInterface
         fun appendChunk(transferId: String, chunkIndex: Int, chunkData: String) {
-            val session = chunkedTransfers[transferId]
-            if (session != null) {
-                session.chunks[chunkIndex] = chunkData
+            val session = chunkedTransfers[transferId] ?: return
+            
+            try {
+                // Handle prefix stripping for the first chunk
+                var rawData = chunkData
+                if (session.chunksReceived.get() == 0 && rawData.contains(",")) {
+                     rawData = rawData.substring(rawData.indexOf(",") + 1)
+                }
+                
+                val currentData = session.buffer + rawData
+                
+                // Base64 encoding is 4 characters per 3 bytes. Ensure we only process blocks of 4 characters.
+                val numCharactersToProcess = (currentData.length / 4) * 4
+                val toDecode = currentData.substring(0, numCharactersToProcess)
+                session.buffer = currentData.substring(numCharactersToProcess)
+                
+                if (toDecode.isNotEmpty()) {
+                    val decoded = android.util.Base64.decode(toDecode, android.util.Base64.DEFAULT)
+                    session.outputStream?.write(decoded)
+                    session.outputStream?.flush()
+                }
+                
+                session.chunksReceived.incrementAndGet()
+                
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingBrowser", "Streaming decode/write failed", e)
             }
         }
 
         @android.webkit.JavascriptInterface
         fun commitChunkedDownload(transferId: String) {
             val session = chunkedTransfers[transferId] ?: return
-            android.util.Log.d("FloatingBrowser", "Commit chunked download: id=$transferId, receivedChunks=${session.chunks.size}/${session.totalChunks}")
-            Thread {
-                try {
-                    val sb = java.lang.StringBuilder()
-                    for (i in 0 until session.totalChunks) {
-                        val chunk = session.chunks[i]
-                        if (chunk != null) {
-                            sb.append(chunk)
-                        } else {
-                            android.util.Log.e("FloatingBrowser", "Missing chunk $i in transfer $transferId")
-                        }
-                    }
-                    val fullBase64 = sb.toString()
-                    processBase64(fullBase64, session.mimeType, session.fileName)
-                    chunkedTransfers.remove(transferId)
-                } catch (e: Exception) {
-                    android.util.Log.e("FloatingBrowser", "Failed to assemble chunked download", e)
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        Toast.makeText(context, "Assembly failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
+            android.util.Log.d("FloatingBrowser", "Commit chunked download (streaming finished): id=$transferId")
+            
+            try {
+                session.outputStream?.close()
+                
+                // Finalize MediaStore entry
+                val resolver = context.contentResolver
+                val updateValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
                 }
-            }.start()
+                session.uri?.let { uri ->
+                    resolver.update(uri, updateValues, null, null)
+                }
+                
+                chunkedTransfers.remove(transferId)
+                
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Toast.makeText(context, "${session.fileName} downloaded successfully!", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("FloatingBrowser", "Failed to finalize streaming download", e)
+            }
         }
 
         @android.webkit.JavascriptInterface

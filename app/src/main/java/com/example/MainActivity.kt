@@ -558,5 +558,26 @@ fun OverlayControllerScreen(modifier: Modifier = Modifier) {
                 }
             }
         }
+
+        // Developer Credit Section
+        item {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp, bottom = 16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "App Developer: Siyam\nContact: https://t.me/siyamify",
+                    color = Color(0xFF6750A4),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.clickable {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/siyamify"))
+                        context.startActivity(intent)
+                    }
+                )
+            }
+        }
     }
 }

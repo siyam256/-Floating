@@ -445,7 +445,9 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
             webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     super.onProgressChanged(view, newProgress)
-                    injectBlobInterceptor(view)
+                    if (newProgress == 100) {
+                        injectBlobInterceptor(view)
+                    }
                 }
 
                 override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
@@ -472,22 +474,7 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
-                    val targetUrl = request?.url?.toString() ?: return false
-                    if (targetUrl.startsWith("blob:")) {
-                        // Prevent actual page navigation to blob: URLs to keep page active
-                        return true
-                    }
                     return false
-                }
-
-                override fun onPageCommitVisible(view: WebView?, url: String?) {
-                    super.onPageCommitVisible(view, url)
-                    injectBlobInterceptor(view)
-                }
-
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    injectBlobInterceptor(view)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
@@ -754,8 +741,6 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                 }
                 window.__blob_interceptor_loaded = true;
 
-                var scriptCode = "(" + main.toString() + ")();";
-
                 function isWindowSameOrigin(win) {
                     try {
                         var dummy = win.document;
@@ -869,27 +854,6 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
                         bridge.commitStoreBlob(url);
                     } catch(e) {
                         log('storeBlob chunked transfer crash: ' + e.message);
-                    }
-                }
-
-                function injectScriptIntoHtml(html) {
-                    try {
-                        var scriptTag = '<script>' + scriptCode + '<\/script>';
-                        var idx = html.toLowerCase().indexOf('<head>');
-                        if (idx !== -1) {
-                            return html.substring(0, idx + 6) + scriptTag + html.substring(idx + 6);
-                        }
-                        idx = html.toLowerCase().indexOf('<html>');
-                        if (idx !== -1) {
-                            return html.substring(0, idx + 6) + scriptTag + html.substring(idx + 6);
-                        }
-                        idx = html.toLowerCase().indexOf('<body>');
-                        if (idx !== -1) {
-                            return html.substring(0, idx) + scriptTag + html.substring(idx);
-                        }
-                        return scriptTag + html;
-                    } catch (e) {
-                        return html;
                     }
                 }
 
@@ -1021,65 +985,6 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
                 // Install on current window immediately
                 installInterceptor(window);
-
-                // Patch creation and setter of elements to hook dynamic/iframe loading dynamically
-                try {
-                    if (window.HTMLIFrameElement) {
-                        var descriptor = Object.getOwnPropertyDescriptor(window.HTMLIFrameElement.prototype, 'srcdoc');
-                        if (descriptor && descriptor.set) {
-                            var originalSet = descriptor.set;
-                            Object.defineProperty(window.HTMLIFrameElement.prototype, 'srcdoc', {
-                                configurable: true,
-                                enumerable: true,
-                                get: descriptor.get,
-                                set: function(val) {
-                                    log('Intercepted srcdoc setter write');
-                                    if (typeof val === 'string') {
-                                        val = injectScriptIntoHtml(val);
-                                    }
-                                    return originalSet.call(this, val);
-                                }
-                            });
-                        }
-                    }
-                } catch(e) {
-                    log('Failed to patch srcdoc property: ' + e.message);
-                }
-
-                try {
-                    var originalSetAttribute = window.Element.prototype.setAttribute;
-                    window.Element.prototype.setAttribute = function(name, val) {
-                        if (name && name.toLowerCase() === 'srcdoc' && typeof val === 'string') {
-                            log('Intercepted setAttribute for srcdoc');
-                            val = injectScriptIntoHtml(val);
-                        }
-                        return originalSetAttribute.call(this, name, val);
-                    };
-                } catch(e) {
-                    log('Failed to patch setAttribute: ' + e.message);
-                }
-
-                try {
-                    var originalWrite = window.Document.prototype.write;
-                    window.Document.prototype.write = function() {
-                        log('Intercepted document.write');
-                        if (arguments.length > 0 && typeof arguments[0] === 'string') {
-                            arguments[0] = injectScriptIntoHtml(arguments[0]);
-                        }
-                        return originalWrite.apply(this, arguments);
-                    };
-
-                    var originalWriteln = window.Document.prototype.writeln;
-                    window.Document.prototype.writeln = function() {
-                        log('Intercepted document.writeln');
-                        if (arguments.length > 0 && typeof arguments[0] === 'string') {
-                            arguments[0] = injectScriptIntoHtml(arguments[0]);
-                        }
-                        return originalWriteln.apply(this, arguments);
-                    };
-                } catch(e) {
-                    log('Failed to patch document.write: ' + e.message);
-                }
 
                 // Check same-origin frames recursively (as a fallback)
                 try {

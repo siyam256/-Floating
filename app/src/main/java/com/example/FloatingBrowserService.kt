@@ -144,6 +144,13 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
         initWebView()
         setupFloatingWindow()
+
+        // Auto-clear cache on startup to ensure a completely clean session
+        try {
+            CacheUtil.clearCache(this)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -1728,7 +1735,14 @@ class FloatingBrowserService : Service(), LifecycleOwner, ViewModelStoreOwner, S
 
         try {
             webView.stopLoading()
+            webView.clearCache(true)
             webView.destroy()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        try {
+            CacheUtil.clearCache(this)
         } catch (e: Exception) {
             e.printStackTrace()
         }

@@ -1,0 +1,129 @@
+name: Generate Keystore & Signed AAB / APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      generate_new_keystore:
+        description: 'Do you want to generate a NEW .jks keystore? (Recommended for the first release)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      keystore_password:
+        description: 'Enter Keystore Password'
+        required: true
+        default: 'my_secure_password123'
+      key_alias:
+        description: 'Enter Key Alias (For new keystore, leave as "upload")'
+        required: true
+        default: 'upload'
+      key_password:
+        description: 'Enter Key Password (If empty, Keystore Password will be used)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build & Sign Release Bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Prepare Signing Keystore
+        id: prepare_keystore
+        run: |
+          if [ "${{ github.event.inputs.generate_new_keystore }}" = "true" ]; then
+            echo "--------------------------------------------------------"
+            echo "⏳ Generating a brand new JKS keystore..."
+            echo "--------------------------------------------------------"
+            
+            KEY_PASS="${{ github.event.inputs.key_password }}"
+            if [ -z "$KEY_PASS" ]; then
+              KEY_PASS="${{ github.event.inputs.keystore_password }}"
+            fi
+            
+            keytool -genkeypair \
+              -v \
+              -keystore my-upload-key.jks \
+              -alias "${{ github.event.inputs.key_alias }}" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -storepass "${{ github.event.inputs.keystore_password }}" \
+              -keypass "$KEY_PASS" \
+              -dname "CN=Floating Browser, OU=Android, O=Developer, L=Dhaka, S=Dhaka, C=BD"
+            
+            echo "✅ Keystore generated successfully at the root directory as: my-upload-key.jks"
+            echo "new_keystore_created=true" >> $GITHUB_OUTPUT
+          else
+            echo "--------------------------------------------------------"
+            echo "⏳ Restoring existing keystore from GitHub Secrets..."
+            echo "--------------------------------------------------------"
+            
+            if [ -z "${{ secrets.BASE64_KEYSTORE }}" ]; then
+              echo "❌ Error: BASE64_KEYSTORE secret is not found or empty!"
+              echo "Play publish করার জন্য অবশ্যই GitHub Secret এ BASE64_KEYSTORE কলামে আপনার jks টাকে Base64 এ কনভার্ট করে দিতে হবে।"
+              echo "অথবা উপরে generate_new_keystore অপশনে 'true' সিলেক্ট করে নতুন কীস্টোর তৈরি করতে পারেন।"
+              exit 1
+            fi
+            
+            echo "${{ secrets.BASE64_KEYSTORE }}" | base64 -d > my-upload-key.jks
+            echo "✅ Decoded and restored existing keystore."
+            echo "new_keystore_created=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Signed AAB (App Bundle for Play Store)
+        env:
+          STORE_PASSWORD: ${{ github.event.inputs.keystore_password }}
+          KEY_PASSWORD: ${{ github.event.inputs.key_password != '' && github.event.inputs.key_password || github.event.inputs.keystore_password }}
+          KEY_ALIAS: ${{ github.event.inputs.key_alias }}
+          KEYSTORE_PATH: "./my-upload-key.jks"
+        run: |
+          echo "Building signed production AAB..."
+          ./gradlew bundleRelease
+
+      - name: Build Signed APK (For manual testing on mobile)
+        env:
+          STORE_PASSWORD: ${{ github.event.inputs.keystore_password }}
+          KEY_PASSWORD: ${{ github.event.inputs.key_password != '' && github.event.inputs.key_password || github.event.inputs.keystore_password }}
+          KEY_ALIAS: ${{ github.event.inputs.key_alias }}
+          KEYSTORE_PATH: "./my-upload-key.jks"
+        run: |
+          echo "Building signed installation APK..."
+          ./gradlew assembleRelease
+
+      - name: Upload Signed AAB (Play Store Release Bundle)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-signed-aab
+          path: build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+
+      - name: Upload Signed APK (Direct Installation Package)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-signed-apk
+          path: build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload Generated Keystore (.jks)
+        if: ${{ steps.prepare_keystore.outputs.new_keystore_created == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-keystore-jks
+          path: my-upload-key.jks
+          if-no-files-found: error

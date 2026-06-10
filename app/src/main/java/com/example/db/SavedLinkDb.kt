@@ -30,6 +30,9 @@ interface SavedLinkDao {
 
     @Query("DELETE FROM saved_links WHERE id = :id")
     suspend fun deleteLink(id: Long)
+
+    @Query("DELETE FROM saved_links")
+    suspend fun deleteAllLinks()
 }
 
 @Database(entities = [SavedLink::class], version = 1, exportSchema = false)
@@ -63,5 +66,9 @@ class SavedLinkRepository(private val savedLinkDao: SavedLinkDao) {
 
     suspend fun delete(id: Long) {
         savedLinkDao.deleteLink(id)
+    }
+
+    suspend fun deleteAll() {
+        savedLinkDao.deleteAllLinks()
     }
 }
